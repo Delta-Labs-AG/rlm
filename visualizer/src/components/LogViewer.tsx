@@ -1,0 +1,191 @@
+'use client';
+
+import { useState, useEffect, useCallback } from 'react';
+import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
+import { StatsCard } from './StatsCard';
+import { TrajectoryPanel } from './TrajectoryPanel';
+import { ExecutionPanel } from './ExecutionPanel';
+import { IterationTimeline } from './IterationTimeline';
+import { RLMLogFile } from '@/lib/types';
+
+interface LogViewerProps {
+  logFile: RLMLogFile;
+  onBack: () => void;
+}
+
+export function LogViewer({ logFile, onBack }: LogViewerProps) {
+  const [selectedIteration, setSelectedIteration] = useState(0);
+  const { iterations, metadata } = logFile;
+
+  const goToPrevious = useCallback(() => {
+    setSelectedIteration(prev => Math.max(0, prev - 1));
+  }, []);
+
+  const goToNext = useCallback(() => {
+    setSelectedIteration(prev => Math.min(iterations.length - 1, prev + 1));
+  }, [iterations.length]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'ArrowLeft' || e.key === 'j') {
+        goToPrevious();
+      } else if (e.key === 'ArrowRight' || e.key === 'k') {
+        goToNext();
+      } else if (e.key === 'Escape') {
+        onBack();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [goToPrevious, goToNext, onBack]);
+
+  return (
+    <div className="h-screen flex flex-col overflow-hidden">
+      {/* Top Bar - Compact header */}
+      <header className="border-b border-border bg-card/50 backdrop-blur-sm">
+        <div className="px-6 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={onBack}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                ← Back
+              </Button>
+              <div className="h-5 w-px bg-border" />
+              <div>
+                <h1 className="font-semibold flex items-center gap-2 text-sm">
+                  <span className="text-[oklch(0.8_0.15_195)]">◈</span>
+                  {logFile.fileName}
+                </h1>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {metadata.hasErrors && (
+                <Badge variant="destructive" className="text-xs">Has Errors</Badge>
+              )}
+              {metadata.finalAnswer && (
+                <Badge className="bg-[oklch(0.75_0.2_145)] text-white text-xs">
+                  Completed
+                </Badge>
+              )}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Question & Answer + Stats Row */}
+      <div className="border-b border-border bg-card/30 px-6 py-4">
+        <div className="flex gap-6">
+          {/* Question & Answer Summary */}
+          <Card className="flex-1 bg-gradient-to-r from-[oklch(0.8_0.15_195/0.05)] to-[oklch(0.7_0.2_320/0.05)] border-[oklch(0.8_0.15_195/0.2)]">
+            <CardContent className="p-4">
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                    Context / Question
+                  </p>
+                  <p className="text-sm font-medium line-clamp-2">
+                    {metadata.contextQuestion}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                    Final Answer
+                  </p>
+                  <p className="text-sm font-medium text-[oklch(0.9_0.18_90)] line-clamp-2">
+                    {metadata.finalAnswer || 'Not yet completed'}
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Quick Stats */}
+          <div className="flex gap-2">
+            <StatsCard
+              label="Iterations"
+              value={metadata.totalIterations}
+              icon="◎"
+              variant="cyan"
+            />
+            <StatsCard
+              label="Code"
+              value={metadata.totalCodeBlocks}
+              icon="⟨⟩"
+              variant="green"
+            />
+            <StatsCard
+              label="Sub-LM"
+              value={metadata.totalSubLMCalls}
+              icon="◇"
+              variant="magenta"
+            />
+            <StatsCard
+              label="Exec"
+              value={`${(metadata.totalExecutionTime * 1000).toFixed(0)}ms`}
+              icon="⏱"
+              variant="yellow"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Iteration Timeline - Full width scrollable row */}
+      <IterationTimeline
+        iterations={iterations}
+        selectedIteration={selectedIteration}
+        onSelectIteration={setSelectedIteration}
+      />
+
+      {/* Main Content - Resizable Split View */}
+      <div className="flex-1 min-h-0">
+        <ResizablePanelGroup orientation="horizontal">
+          {/* Left Panel - Trajectory */}
+          <ResizablePanel defaultSize={35} minSize={25} maxSize={50}>
+            <div className="h-full border-r border-border bg-card/30">
+              <TrajectoryPanel
+                iterations={iterations}
+                selectedIteration={selectedIteration}
+                onSelectIteration={setSelectedIteration}
+              />
+            </div>
+          </ResizablePanel>
+
+          <ResizableHandle withHandle className="bg-border hover:bg-[oklch(0.8_0.15_195/0.3)] transition-colors" />
+
+          {/* Right Panel - Execution Details */}
+          <ResizablePanel defaultSize={65} minSize={40}>
+            <div className="h-full bg-background">
+              <ExecutionPanel
+                iteration={iterations[selectedIteration] || null}
+              />
+            </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      </div>
+
+      {/* Keyboard hint footer */}
+      <div className="border-t border-border bg-card/30 px-6 py-1.5">
+        <div className="flex items-center justify-center gap-6 text-[10px] text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <kbd className="px-1 py-0.5 bg-muted rounded text-[9px]">←</kbd>
+            <kbd className="px-1 py-0.5 bg-muted rounded text-[9px]">→</kbd>
+            Navigate
+          </span>
+          <span className="flex items-center gap-1">
+            <kbd className="px-1 py-0.5 bg-muted rounded text-[9px]">Esc</kbd>
+            Back
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}

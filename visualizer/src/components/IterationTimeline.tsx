@@ -1,0 +1,166 @@
+'use client';
+
+import { useRef, useEffect } from 'react';
+import { Badge } from '@/components/ui/badge';
+import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
+import { cn } from '@/lib/utils';
+import { RLMIteration, extractFinalAnswer } from '@/lib/types';
+
+interface IterationTimelineProps {
+  iterations: RLMIteration[];
+  selectedIteration: number;
+  onSelectIteration: (index: number) => void;
+}
+
+function getIterationStats(iteration: RLMIteration) {
+  let totalSubCalls = 0;
+  let totalExecTime = 0;
+  let hasError = false;
+  
+  for (const block of iteration.code_blocks) {
+    if (block.result) {
+      totalExecTime += block.result.execution_time || 0;
+      if (block.result.stderr) hasError = true;
+      if (block.result.rlm_calls) {
+        totalSubCalls += block.result.rlm_calls.length;
+      }
+    }
+  }
+  
+  // Estimate token counts from prompt (rough estimation)
+  const promptText = iteration.prompt.map(m => m.content).join('');
+  const estimatedInputTokens = Math.round(promptText.length / 4);
+  const estimatedOutputTokens = Math.round(iteration.response.length / 4);
+  
+  return {
+    codeBlocks: iteration.code_blocks.length,
+    subCalls: totalSubCalls,
+    execTime: totalExecTime,
+    hasError,
+    hasFinal: iteration.final_answer !== null,
+    inputTokens: estimatedInputTokens,
+    outputTokens: estimatedOutputTokens,
+  };
+}
+
+export function IterationTimeline({ 
+  iterations, 
+  selectedIteration, 
+  onSelectIteration 
+}: IterationTimelineProps) {
+  const selectedRef = useRef<HTMLDivElement>(null);
+  
+  // Auto-scroll to selected iteration
+  useEffect(() => {
+    if (selectedRef.current) {
+      selectedRef.current.scrollIntoView({ 
+        behavior: 'smooth', 
+        block: 'nearest',
+        inline: 'center' 
+      });
+    }
+  }, [selectedIteration]);
+
+  return (
+    <div className="border-b border-border bg-card/30 flex-shrink-0">
+      <ScrollArea className="w-full">
+        <div className="flex gap-2 p-3">
+          {iterations.map((iteration, idx) => {
+            const stats = getIterationStats(iteration);
+            const isSelected = idx === selectedIteration;
+            const finalAnswer = extractFinalAnswer(iteration.final_answer);
+            const responseSnippet = iteration.response.slice(0, 60).replace(/\n/g, ' ');
+            
+            return (
+              <div
+                key={idx}
+                ref={isSelected ? selectedRef : null}
+                onClick={() => onSelectIteration(idx)}
+                className={cn(
+                  'flex-shrink-0 w-72 cursor-pointer transition-all duration-150 rounded-lg border',
+                  isSelected
+                    ? 'border-[oklch(0.8_0.15_195)] bg-[oklch(0.8_0.15_195/0.1)] shadow-md shadow-[oklch(0.8_0.15_195/0.15)]'
+                    : stats.hasFinal
+                      ? 'border-[oklch(0.75_0.2_145/0.4)] bg-[oklch(0.75_0.2_145/0.03)] hover:border-[oklch(0.75_0.2_145/0.6)]'
+                      : stats.hasError
+                        ? 'border-[oklch(0.65_0.25_25/0.4)] bg-[oklch(0.65_0.25_25/0.03)] hover:border-[oklch(0.65_0.25_25/0.6)]'
+                        : 'border-border hover:border-[oklch(0.8_0.15_195/0.4)] hover:bg-muted/20'
+                )}
+              >
+                {/* Compact single-row layout */}
+                <div className="p-2.5 flex items-start gap-3">
+                  {/* Iteration number */}
+                  <div className={cn(
+                    'w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0',
+                    isSelected
+                      ? 'bg-[oklch(0.8_0.15_195)] text-[oklch(0.1_0.02_260)]'
+                      : stats.hasFinal
+                        ? 'bg-[oklch(0.75_0.2_145)] text-white'
+                        : stats.hasError
+                          ? 'bg-[oklch(0.65_0.25_25)] text-white'
+                          : 'bg-muted text-muted-foreground'
+                  )}>
+                    {idx + 1}
+                  </div>
+                  
+                  {/* Content */}
+                  <div className="flex-1 min-w-0">
+                    {/* Top row: badges */}
+                    <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                      {stats.hasFinal && (
+                        <Badge className="bg-[oklch(0.9_0.18_90/0.2)] text-[oklch(0.9_0.18_90)] border-[oklch(0.9_0.18_90/0.3)] text-[9px] px-1 py-0 h-4">
+                          FINAL
+                        </Badge>
+                      )}
+                      {stats.hasError && (
+                        <Badge variant="destructive" className="text-[9px] px-1 py-0 h-4">
+                          ERR
+                        </Badge>
+                      )}
+                      {stats.codeBlocks > 0 && (
+                        <span className="text-[10px] text-[oklch(0.75_0.2_145)]">
+                          {stats.codeBlocks} code
+                        </span>
+                      )}
+                      {stats.subCalls > 0 && (
+                        <span className="text-[10px] text-[oklch(0.7_0.2_320)]">
+                          {stats.subCalls} sub
+                        </span>
+                      )}
+                      <span className="text-[10px] text-muted-foreground ml-auto">
+                        {(stats.execTime * 1000).toFixed(0)}ms
+                      </span>
+                    </div>
+                    
+                    {/* Response preview */}
+                    <p className="text-[10px] text-muted-foreground truncate leading-relaxed">
+                      {responseSnippet}{iteration.response.length > 60 ? '...' : ''}
+                    </p>
+                    
+                    {/* Bottom row: tokens */}
+                    <div className="flex items-center gap-2 mt-1 text-[9px] font-mono text-muted-foreground/70">
+                      <span>
+                        <span className="text-[oklch(0.6_0.1_195)]">{(stats.inputTokens / 1000).toFixed(1)}k</span>
+                        <span className="mx-0.5">→</span>
+                        <span className="text-[oklch(0.6_0.1_145)]">{(stats.outputTokens / 1000).toFixed(1)}k</span>
+                      </span>
+                      {stats.hasFinal && finalAnswer && (
+                        <>
+                          <span className="text-border">│</span>
+                          <span className="text-[oklch(0.9_0.18_90)] truncate max-w-[100px]">
+                            = {finalAnswer}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <ScrollBar orientation="horizontal" />
+      </ScrollArea>
+    </div>
+  );
+}
