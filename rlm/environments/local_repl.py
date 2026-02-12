@@ -15,6 +15,36 @@ from rlm.core.comms_utils import LMRequest, send_lm_request, send_lm_request_bat
 from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import NonIsolatedEnv
 
+# Rate limit detection markers for error strings returned by the LM handler
+_RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "ratelimit", "429", "[rate_limited]")
+
+# Markers for error text that leaks into "successful" response content
+_LEAKED_ERROR_MARKERS = (
+    "[rate_limited]",
+    "[llm_error]",
+    "[generation_failed]",
+    "error: request failed",
+    "error: lm query failed",
+)
+
+
+def _is_rate_limit_error(error_str: str) -> bool:
+    """Check if an error string indicates a rate limit failure."""
+    lower = error_str.lower()
+    return any(marker in lower for marker in _RATE_LIMIT_MARKERS)
+
+
+def _content_is_leaked_error(content: str) -> bool:
+    """Check if response content contains error text that leaked through as 'successful'.
+
+    Long responses (>5000 chars) are assumed to be real content.
+    """
+    if not content or len(content) > 5000:
+        return False
+    lower = content.lower()
+    return any(marker in lower for marker in _LEAKED_ERROR_MARKERS)
+
+
 # =============================================================================
 # Safe Builtins
 # =============================================================================
@@ -207,9 +237,13 @@ class LocalREPL(NonIsolatedEnv):
             if cc.error:
                 return f"__LLM_ERROR__|{cc.error_type}|{cc.status_code or 0}|{cc.error}"
 
+            content = cc.response
+            if _content_is_leaked_error(content):
+                return f"__LLM_ERROR__|leaked_error|0|LLM returned error content: {content[:200]}"
+
             # Track this LLM call
             self._pending_llm_calls.append(cc)
-            return cc.response
+            return content
         except Exception as e:
             return f"__LLM_ERROR__|socket_error|0|LM query failed - {e}"
 
@@ -252,8 +286,12 @@ class LocalREPL(NonIsolatedEnv):
                             f"__LLM_ERROR__|{cc.error_type}|{cc.status_code or 0}|{cc.error}"
                         )
                     else:
-                        self._pending_llm_calls.append(cc)
-                        results.append(cc.response)
+                        content = cc.response
+                        if _content_is_leaked_error(content):
+                            results.append("[GENERATION_FAILED]")
+                        else:
+                            self._pending_llm_calls.append(cc)
+                            results.append(content)
 
             return results
         except Exception as e:

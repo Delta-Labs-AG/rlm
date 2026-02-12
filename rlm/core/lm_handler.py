@@ -5,6 +5,7 @@ Uses a multi-threaded socket server. Protocol: 4-byte length prefix + JSON paylo
 """
 
 import asyncio
+import os
 import time
 from socketserver import StreamRequestHandler, ThreadingTCPServer
 from threading import Thread
@@ -12,6 +13,8 @@ from threading import Thread
 from rlm.clients.base_lm import BaseLM
 from rlm.core.comms_utils import LMRequest, LMResponse, socket_recv, socket_send
 from rlm.core.types import RLMChatCompletion, UsageSummary
+
+_BATCH_CHUNK_SIZE = max(1, min(int(os.getenv("OPENAI_BATCH_CHUNK_SIZE", "40")), 500))
 
 
 class LMRequestHandler(StreamRequestHandler):
@@ -87,11 +90,16 @@ class LMRequestHandler(StreamRequestHandler):
 
         async def run_all():
             formats = request.response_formats or [None] * len(request.prompts)
-            tasks = [
-                client.acompletion(prompt, response_format=fmt)
-                for prompt, fmt in zip(request.prompts, formats, strict=True)
-            ]
-            return await asyncio.gather(*tasks, return_exceptions=True)
+            all_results = []
+            prompts_and_formats = list(zip(request.prompts, formats, strict=True))
+            for i in range(0, len(prompts_and_formats), _BATCH_CHUNK_SIZE):
+                chunk = prompts_and_formats[i : i + _BATCH_CHUNK_SIZE]
+                chunk_results = await asyncio.gather(
+                    *[client.acompletion(prompt, response_format=fmt) for prompt, fmt in chunk],
+                    return_exceptions=True,
+                )
+                all_results.extend(chunk_results)
+            return all_results
 
         results = asyncio.run(run_all())
         end_time = time.perf_counter()
