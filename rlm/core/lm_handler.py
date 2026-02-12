@@ -63,7 +63,9 @@ class LMRequestHandler(StreamRequestHandler):
         client = handler.get_client(request.model, request.depth)
 
         start_time = time.perf_counter()
-        content = client.completion(request.prompt)
+        content = client.completion(
+            request.prompt, response_format=request.response_format
+        )
         end_time = time.perf_counter()
 
         model_usage = client.get_last_usage()
@@ -86,7 +88,11 @@ class LMRequestHandler(StreamRequestHandler):
         start_time = time.perf_counter()
 
         async def run_all():
-            tasks = [client.acompletion(prompt) for prompt in request.prompts]
+            formats = request.response_formats or [None] * len(request.prompts)
+            tasks = [
+                client.acompletion(prompt, response_format=fmt)
+                for prompt, fmt in zip(request.prompts, formats, strict=True)
+            ]
             return await asyncio.gather(*tasks, return_exceptions=True)
 
         results = asyncio.run(run_all())

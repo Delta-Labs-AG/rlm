@@ -175,18 +175,27 @@ class LocalREPL(NonIsolatedEnv):
             return str(self.locals[variable_name])
         return f"Error: Variable '{variable_name}' not found"
 
-    def _llm_query(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+    def _llm_query(
+        self,
+        prompt: str | list[dict[str, Any]],
+        model: str | None = None,
+        response_format: dict | None = None,
+    ) -> str:
         """Query the LM via socket connection to the handler.
 
         Args:
             prompt: The prompt to send — string or list of message dicts (multimodal).
             model: Optional model name to use (if handler has multiple clients).
+            response_format: Optional OpenAI response_format dict for structured output.
         """
         if not self.lm_handler_address:
             return "Error: No LM handler configured"
 
         try:
-            request = LMRequest(prompt=prompt, model=model, depth=self.depth)
+            request = LMRequest(
+                prompt=prompt, model=model, depth=self.depth,
+                response_format=response_format,
+            )
             response = send_lm_request(self.lm_handler_address, request)
 
             if not response.success:
@@ -202,13 +211,17 @@ class LocalREPL(NonIsolatedEnv):
             return f"Error: LM query failed - {e}"
 
     def _llm_query_batched(
-        self, prompts: list[str | list[dict[str, Any]]], model: str | None = None
+        self,
+        prompts: list[str | list[dict[str, Any]]],
+        model: str | None = None,
+        response_formats: list[dict | None] | None = None,
     ) -> list[str]:
         """Query the LM with multiple prompts concurrently.
 
         Args:
             prompts: List of prompts — each is a string or list of message dicts (multimodal).
             model: Optional model name to use (if handler has multiple clients).
+            response_formats: Optional per-prompt response_format dicts. Length must match prompts.
 
         Returns:
             List of responses in the same order as input prompts.
@@ -218,7 +231,8 @@ class LocalREPL(NonIsolatedEnv):
 
         try:
             responses = send_lm_request_batched(
-                self.lm_handler_address, prompts, model=model, depth=self.depth
+                self.lm_handler_address, prompts, model=model, depth=self.depth,
+                response_formats=response_formats,
             )
 
             results = []

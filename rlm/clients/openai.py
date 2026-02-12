@@ -80,35 +80,11 @@ class OpenAIClient(BaseLM):
         self.model_total_tokens: dict[str, int] = defaultdict(int)
 
     @retry(**_RETRY_CONFIG)
-    def completion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
-        if isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
-        elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
-            messages = prompt
-        else:
-            raise ValueError(f"Invalid prompt type: {type(prompt)}")
-
-        model = model or self.model_name
-        if not model:
-            raise ValueError("Model name is required for OpenAI client.")
-
-        extra_body = {}
-        if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
-            extra_body["usage"] = {"include": True}
-
-        kwargs = {"model": model, "messages": messages}
-        if extra_body:
-            kwargs["extra_body"] = extra_body
-        if self.reasoning_effort:
-            kwargs["reasoning_effort"] = self.reasoning_effort
-
-        response = self.client.chat.completions.create(**kwargs)
-        self._track_cost(response, model)
-        return response.choices[0].message.content
-
-    @retry(**_RETRY_CONFIG)
-    async def acompletion(
-        self, prompt: str | list[dict[str, Any]], model: str | None = None
+    def completion(
+        self,
+        prompt: str | list[dict[str, Any]],
+        model: str | None = None,
+        response_format: dict | None = None,
     ) -> str:
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
@@ -130,6 +106,42 @@ class OpenAIClient(BaseLM):
             kwargs["extra_body"] = extra_body
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+
+        response = self.client.chat.completions.create(**kwargs)
+        self._track_cost(response, model)
+        return response.choices[0].message.content
+
+    @retry(**_RETRY_CONFIG)
+    async def acompletion(
+        self,
+        prompt: str | list[dict[str, Any]],
+        model: str | None = None,
+        response_format: dict | None = None,
+    ) -> str:
+        if isinstance(prompt, str):
+            messages = [{"role": "user", "content": prompt}]
+        elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
+            messages = prompt
+        else:
+            raise ValueError(f"Invalid prompt type: {type(prompt)}")
+
+        model = model or self.model_name
+        if not model:
+            raise ValueError("Model name is required for OpenAI client.")
+
+        extra_body = {}
+        if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
+            extra_body["usage"] = {"include": True}
+
+        kwargs = {"model": model, "messages": messages}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         response = await self.async_client.chat.completions.create(**kwargs)
         self._track_cost(response, model)
