@@ -1,14 +1,34 @@
+import logging
 import os
 from collections import defaultdict
 from typing import Any
 
 import openai
 from dotenv import load_dotenv
+from openai import APITimeoutError, RateLimitError
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from rlm.clients.base_lm import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# Retry configuration for rate limits and timeouts
+_RETRY_CONFIG = {
+    "retry": retry_if_exception_type((RateLimitError, APITimeoutError)),
+    "wait": wait_exponential_jitter(initial=1, max=60, jitter=5),
+    "stop": stop_after_attempt(5),
+    "reraise": True,
+    "before_sleep": before_sleep_log(logger, logging.WARNING),
+}
 
 # Load API keys from environment variables
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -27,9 +47,11 @@ class OpenAIClient(BaseLM):
         api_key: str | None = None,
         model_name: str | None = None,
         base_url: str | None = None,
+        reasoning_effort: str | None = None,
         **kwargs,
     ):
         super().__init__(model_name=model_name, **kwargs)
+        self.reasoning_effort = reasoning_effort  # none, minimal, low, medium, high, xhigh
 
         if api_key is None:
             if base_url == "https://api.openai.com/v1" or base_url is None:
@@ -40,8 +62,15 @@ class OpenAIClient(BaseLM):
                 api_key = DEFAULT_VERCEL_API_KEY
 
         # For vLLM, set base_url to local vLLM server address.
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
-        self.async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+        import httpx
+
+        _timeout = httpx.Timeout(600.0, connect=10.0)
+        self.client = openai.OpenAI(
+            api_key=api_key, base_url=base_url, timeout=_timeout, max_retries=3
+        )
+        self.async_client = openai.AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=_timeout, max_retries=3
+        )
         self.model_name = model_name
 
         # Per-model usage tracking
@@ -50,6 +79,7 @@ class OpenAIClient(BaseLM):
         self.model_output_tokens: dict[str, int] = defaultdict(int)
         self.model_total_tokens: dict[str, int] = defaultdict(int)
 
+    @retry(**_RETRY_CONFIG)
     def completion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
@@ -66,12 +96,17 @@ class OpenAIClient(BaseLM):
         if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
             extra_body["usage"] = {"include": True}
 
-        response = self.client.chat.completions.create(
-            model=model, messages=messages, extra_body=extra_body
-        )
+        kwargs = {"model": model, "messages": messages}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+
+        response = self.client.chat.completions.create(**kwargs)
         self._track_cost(response, model)
         return response.choices[0].message.content
 
+    @retry(**_RETRY_CONFIG)
     async def acompletion(
         self, prompt: str | list[dict[str, Any]], model: str | None = None
     ) -> str:
@@ -90,9 +125,13 @@ class OpenAIClient(BaseLM):
         if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
             extra_body["usage"] = {"include": True}
 
-        response = await self.async_client.chat.completions.create(
-            model=model, messages=messages, extra_body=extra_body
-        )
+        kwargs = {"model": model, "messages": messages}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+
+        response = await self.async_client.chat.completions.create(**kwargs)
         self._track_cost(response, model)
         return response.choices[0].message.content
 
