@@ -130,8 +130,12 @@ class LocalREPL(NonIsolatedEnv):
         super().__init__(persistent=persistent, depth=depth, **kwargs)
 
         self.lm_handler_address = lm_handler_address
-        self.original_cwd = os.getcwd()
-        self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_{uuid.uuid4()}_")
+        # Permanent per-instance working directory under a stable base path.
+        # No os.chdir() — CWD is process-global and unsafe across threads.
+        base_dir = os.path.join(tempfile.gettempdir(), "rlm_repl_envs")
+        os.makedirs(base_dir, exist_ok=True)
+        self.temp_dir = os.path.join(base_dir, str(uuid.uuid4()))
+        os.makedirs(self.temp_dir, exist_ok=True)
         self._lock = threading.Lock()
         self._context_count: int = 0
         self._history_count: int = 0
@@ -161,7 +165,6 @@ class LocalREPL(NonIsolatedEnv):
 
         # Add helper functions
         self.globals["FINAL_VAR"] = self._final_var
-        self.globals["SHOW_VARS"] = self._show_vars
         self.globals["llm_query"] = self._llm_query
         self.globals["llm_query_batched"] = self._llm_query_batched
 
@@ -170,40 +173,31 @@ class LocalREPL(NonIsolatedEnv):
         variable_name = variable_name.strip().strip("\"'")
         if variable_name in self.locals:
             return str(self.locals[variable_name])
+        return f"Error: Variable '{variable_name}' not found"
 
-        # Provide helpful error message with available variables
-        available = [k for k in self.locals.keys() if not k.startswith("_")]
-        if available:
-            return (
-                f"Error: Variable '{variable_name}' not found. "
-                f"Available variables: {available}. "
-                f"You must create and assign a variable BEFORE calling FINAL_VAR on it."
-            )
-        return (
-            f"Error: Variable '{variable_name}' not found. "
-            f"No variables have been created yet. "
-            f"You must create and assign a variable in a REPL block BEFORE calling FINAL_VAR on it."
-        )
-
-    def _show_vars(self) -> str:
-        """Show all available variables in the REPL environment."""
-        available = {k: type(v).__name__ for k, v in self.locals.items() if not k.startswith("_")}
-        if not available:
-            return "No variables created yet. Use ```repl``` blocks to create variables."
-        return f"Available variables: {available}"
-
-    def _llm_query(self, prompt: str, model: str | None = None) -> str:
+    def _llm_query(
+        self,
+        prompt: str | list[dict[str, Any]],
+        model: str | None = None,
+        response_format: dict | None = None,
+    ) -> str:
         """Query the LM via socket connection to the handler.
 
         Args:
-            prompt: The prompt to send to the LM.
+            prompt: The prompt to send — string or list of message dicts (multimodal).
             model: Optional model name to use (if handler has multiple clients).
+            response_format: Optional OpenAI response_format dict for structured output.
         """
         if not self.lm_handler_address:
             return "Error: No LM handler configured"
 
         try:
-            request = LMRequest(prompt=prompt, model=model, depth=self.depth)
+            request = LMRequest(
+                prompt=prompt,
+                model=model,
+                depth=self.depth,
+                response_format=response_format,
+            )
             response = send_lm_request(self.lm_handler_address, request)
 
             if not response.success:
@@ -218,12 +212,18 @@ class LocalREPL(NonIsolatedEnv):
         except Exception as e:
             return f"Error: LM query failed - {e}"
 
-    def _llm_query_batched(self, prompts: list[str], model: str | None = None) -> list[str]:
+    def _llm_query_batched(
+        self,
+        prompts: list[str | list[dict[str, Any]]],
+        model: str | None = None,
+        response_formats: list[dict | None] | None = None,
+    ) -> list[str]:
         """Query the LM with multiple prompts concurrently.
 
         Args:
-            prompts: List of prompts to send to the LM.
+            prompts: List of prompts — each is a string or list of message dicts (multimodal).
             model: Optional model name to use (if handler has multiple clients).
+            response_formats: Optional per-prompt response_format dicts. Length must match prompts.
 
         Returns:
             List of responses in the same order as input prompts.
@@ -233,7 +233,11 @@ class LocalREPL(NonIsolatedEnv):
 
         try:
             responses = send_lm_request_batched(
-                self.lm_handler_address, prompts, model=model, depth=self.depth
+                self.lm_handler_address,
+                prompts,
+                model=model,
+                depth=self.depth,
+                response_formats=response_formats,
             )
 
             results = []
@@ -345,13 +349,12 @@ class LocalREPL(NonIsolatedEnv):
 
     @contextmanager
     def _temp_cwd(self):
-        """Temporarily change to temp directory for execution."""
-        old_cwd = os.getcwd()
-        try:
-            os.chdir(self.temp_dir)
-            yield
-        finally:
-            os.chdir(old_cwd)
+        """No-op context manager. CWD is never changed.
+
+        os.chdir() is process-global and fundamentally unsafe in multi-threaded
+        code. All file operations use absolute paths via self.temp_dir instead.
+        """
+        yield
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""

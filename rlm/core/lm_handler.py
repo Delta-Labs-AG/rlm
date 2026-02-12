@@ -63,7 +63,7 @@ class LMRequestHandler(StreamRequestHandler):
         client = handler.get_client(request.model, request.depth)
 
         start_time = time.perf_counter()
-        content = client.completion(request.prompt)
+        content = client.completion(request.prompt, response_format=request.response_format)
         end_time = time.perf_counter()
 
         model_usage = client.get_last_usage()
@@ -86,8 +86,12 @@ class LMRequestHandler(StreamRequestHandler):
         start_time = time.perf_counter()
 
         async def run_all():
-            tasks = [client.acompletion(prompt) for prompt in request.prompts]
-            return await asyncio.gather(*tasks)
+            formats = request.response_formats or [None] * len(request.prompts)
+            tasks = [
+                client.acompletion(prompt, response_format=fmt)
+                for prompt, fmt in zip(request.prompts, formats, strict=True)
+            ]
+            return await asyncio.gather(*tasks, return_exceptions=True)
 
         results = asyncio.run(run_all())
         end_time = time.perf_counter()
@@ -97,16 +101,21 @@ class LMRequestHandler(StreamRequestHandler):
         root_model = request.model or client.model_name
         usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
 
-        chat_completions = [
-            RLMChatCompletion(
-                root_model=root_model,
-                prompt=prompt,
-                response=content,
-                usage_summary=usage_summary,
-                execution_time=total_time / len(request.prompts),  # approximate per-prompt time
+        chat_completions = []
+        for prompt, result in zip(request.prompts, results, strict=True):
+            if isinstance(result, Exception):
+                content = f"Error: Request failed: {result}"
+            else:
+                content = result
+            chat_completions.append(
+                RLMChatCompletion(
+                    root_model=root_model,
+                    prompt=prompt,
+                    response=content,
+                    usage_summary=usage_summary,
+                    execution_time=total_time / len(request.prompts),
+                )
             )
-            for prompt, content in zip(request.prompts, results, strict=True)
-        ]
 
         return LMResponse.batched_success_response(chat_completions=chat_completions)
 
