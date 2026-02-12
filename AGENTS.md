@@ -318,3 +318,48 @@ When building a new isolated environment (e.g., for a new cloud provider):
 
 See `rlm/environments/modal_repl.py` as the canonical reference implementation.
 
+## Claude Code Skills & Agents
+
+### Domain Context Loading
+
+Load focused domain knowledge before working on specific areas:
+
+```
+/domain core           # RLM completion flow, REPL, FINAL_VAR, context reduction
+/domain environments   # Environment development, base classes, broker pattern
+/domain clients        # LM client development, BaseLM, usage tracking
+/domain architecture   # Socket protocol, HTTP broker, comms
+/domain                # Auto-detect from conversation context
+```
+
+Domain docs are living documents in `.claude/skills/domain/docs/`. Add discoveries to the Learnings section.
+
+### Specialized Skills
+
+| Skill | When to Use |
+|-------|-------------|
+| `/domain` | Load domain context before working on specific areas |
+| `/python-pro` | Python 3.11+ type safety, async patterns, pytest |
+| `/architecture-designer` | Design decisions, ADRs, trade-off evaluation |
+
+### Agents
+
+| Agent | Purpose |
+|-------|---------|
+| `code-reviewer` | Review PR diffs for correctness, security, RLM patterns |
+| `test-writer` | Design and write tests using project mock patterns |
+
+### Verification Loop
+
+Always verify changes before committing:
+
+```bash
+uv run ruff check --fix .
+uv run ruff format .
+uv run pytest
+```
+
+### Auto-Formatting Hook
+
+The `.claude/settings.json` runs `ruff check --fix` and `ruff format` automatically on every Python file edit/write.
+
