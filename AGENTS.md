@@ -49,7 +49,7 @@ Do NOT use `_` prefix for private methods unless explicitly requested.
 
 For PRs to `rlm` core:
 ```bash
-git clone https://github.com/alexzhang13/rlm.git
+git clone https://github.com/Delta-Labs-AG/rlm.git
 cd rlm
 
 # Standard development:
