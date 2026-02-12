@@ -255,7 +255,9 @@ def send_lm_request_batched(
     """
     try:
         request = LMRequest(
-            prompts=prompts, model=model, depth=depth,
+            prompts=prompts,
+            model=model,
+            depth=depth,
             response_formats=response_formats,
         )
         response_data = socket_request(address, request.to_dict(), timeout)

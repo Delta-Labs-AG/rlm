@@ -193,7 +193,9 @@ class LocalREPL(NonIsolatedEnv):
 
         try:
             request = LMRequest(
-                prompt=prompt, model=model, depth=self.depth,
+                prompt=prompt,
+                model=model,
+                depth=self.depth,
                 response_format=response_format,
             )
             response = send_lm_request(self.lm_handler_address, request)
@@ -231,7 +233,10 @@ class LocalREPL(NonIsolatedEnv):
 
         try:
             responses = send_lm_request_batched(
-                self.lm_handler_address, prompts, model=model, depth=self.depth,
+                self.lm_handler_address,
+                prompts,
+                model=model,
+                depth=self.depth,
                 response_formats=response_formats,
             )
 

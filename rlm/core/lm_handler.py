@@ -63,9 +63,7 @@ class LMRequestHandler(StreamRequestHandler):
         client = handler.get_client(request.model, request.depth)
 
         start_time = time.perf_counter()
-        content = client.completion(
-            request.prompt, response_format=request.response_format
-        )
+        content = client.completion(request.prompt, response_format=request.response_format)
         end_time = time.perf_counter()
 
         model_usage = client.get_last_usage()

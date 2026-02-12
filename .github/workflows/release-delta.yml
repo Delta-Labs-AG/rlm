@@ -2,7 +2,7 @@ name: Release Delta
 
 on:
   push:
-    branches: [delta-labs]
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -86,7 +86,7 @@ jobs:
           fi
 
           gh release create "$TAG" \
-            --target delta-labs \
+            --target main \
             --title "$TAG" \
             --generate-notes \
             $NOTES_FLAG
