@@ -96,15 +96,25 @@ class RLMChatCompletion:
     response: str
     usage_summary: UsageSummary
     execution_time: float
+    error: str | None = None
+    error_type: str | None = None
+    status_code: int | None = None
 
     def to_dict(self):
-        return {
+        d = {
             "root_model": self.root_model,
             "prompt": self.prompt,
             "response": self.response,
             "usage_summary": self.usage_summary.to_dict(),
             "execution_time": self.execution_time,
         }
+        if self.error is not None:
+            d["error"] = self.error
+        if self.error_type is not None:
+            d["error_type"] = self.error_type
+        if self.status_code is not None:
+            d["status_code"] = self.status_code
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "RLMChatCompletion":
@@ -114,6 +124,9 @@ class RLMChatCompletion:
             response=data.get("response"),
             usage_summary=UsageSummary.from_dict(data.get("usage_summary")),
             execution_time=data.get("execution_time"),
+            error=data.get("error"),
+            error_type=data.get("error_type"),
+            status_code=data.get("status_code"),
         )
 
 

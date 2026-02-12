@@ -104,18 +104,30 @@ class LMRequestHandler(StreamRequestHandler):
         chat_completions = []
         for prompt, result in zip(request.prompts, results, strict=True):
             if isinstance(result, Exception):
-                content = f"Error: Request failed: {result}"
-            else:
-                content = result
-            chat_completions.append(
-                RLMChatCompletion(
-                    root_model=root_model,
-                    prompt=prompt,
-                    response=content,
-                    usage_summary=usage_summary,
-                    execution_time=total_time / len(request.prompts),
+                error_type = type(result).__name__
+                status_code = getattr(result, "status_code", None)
+                chat_completions.append(
+                    RLMChatCompletion(
+                        root_model=root_model,
+                        prompt=prompt,
+                        response="",
+                        usage_summary=usage_summary,
+                        execution_time=total_time / len(request.prompts),
+                        error=str(result),
+                        error_type=error_type,
+                        status_code=status_code,
+                    )
                 )
-            )
+            else:
+                chat_completions.append(
+                    RLMChatCompletion(
+                        root_model=root_model,
+                        prompt=prompt,
+                        response=result,
+                        usage_summary=usage_summary,
+                        execution_time=total_time / len(request.prompts),
+                    )
+                )
 
         return LMResponse.batched_success_response(chat_completions=chat_completions)
 

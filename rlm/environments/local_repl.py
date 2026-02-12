@@ -201,16 +201,17 @@ class LocalREPL(NonIsolatedEnv):
             response = send_lm_request(self.lm_handler_address, request)
 
             if not response.success:
-                return f"Error: {response.error}"
+                return f"__LLM_ERROR__|socket_error|0|{response.error}"
+
+            cc = response.chat_completion
+            if cc.error:
+                return f"__LLM_ERROR__|{cc.error_type}|{cc.status_code or 0}|{cc.error}"
 
             # Track this LLM call
-            self._pending_llm_calls.append(
-                response.chat_completion,
-            )
-
-            return response.chat_completion.response
+            self._pending_llm_calls.append(cc)
+            return cc.response
         except Exception as e:
-            return f"Error: LM query failed - {e}"
+            return f"__LLM_ERROR__|socket_error|0|LM query failed - {e}"
 
     def _llm_query_batched(
         self,
@@ -243,15 +244,20 @@ class LocalREPL(NonIsolatedEnv):
             results = []
             for response in responses:
                 if not response.success:
-                    results.append(f"Error: {response.error}")
+                    results.append(f"__LLM_ERROR__|socket_error|0|{response.error}")
                 else:
-                    # Track this LLM call in list of all calls -- we may want to do this hierarchically
-                    self._pending_llm_calls.append(response.chat_completion)
-                    results.append(response.chat_completion.response)
+                    cc = response.chat_completion
+                    if cc.error:
+                        results.append(
+                            f"__LLM_ERROR__|{cc.error_type}|{cc.status_code or 0}|{cc.error}"
+                        )
+                    else:
+                        self._pending_llm_calls.append(cc)
+                        results.append(cc.response)
 
             return results
         except Exception as e:
-            return [f"Error: LM query failed - {e}"] * len(prompts)
+            return [f"__LLM_ERROR__|socket_error|0|LM query failed - {e}"] * len(prompts)
 
     def load_context(self, context_payload: dict | list | str):
         """Load context into the environment as context_0 (and 'context' alias)."""
