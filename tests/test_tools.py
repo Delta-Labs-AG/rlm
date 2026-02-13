@@ -16,7 +16,6 @@ import pytest
 from rlm.clients.openai import OpenAIClient
 from rlm.environments.local_repl import MAX_TOOL_ITERATIONS, LocalREPL
 
-
 # =============================================================================
 # OpenAI Client Tests
 # =============================================================================
