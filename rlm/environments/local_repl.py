@@ -273,21 +273,23 @@ class LocalREPL(NonIsolatedEnv):
                         return tool_response.get("content") or ""
 
                     # Append assistant message with tool_calls to conversation
-                    messages.append({
-                        "role": "assistant",
-                        "content": tool_response.get("content"),
-                        "tool_calls": [
-                            {
-                                "id": tc["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tc["name"],
-                                    "arguments": json.dumps(tc["arguments"]),
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": tool_response.get("content"),
+                            "tool_calls": [
+                                {
+                                    "id": tc["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc["name"],
+                                        "arguments": json.dumps(tc["arguments"]),
+                                    },
                                 }
-                            }
-                            for tc in tool_calls
-                        ]
-                    })
+                                for tc in tool_calls
+                            ],
+                        }
+                    )
 
                     # Execute each tool and append results
                     for tool_call in tool_calls:
@@ -302,11 +304,13 @@ class LocalREPL(NonIsolatedEnv):
                             tool_result = f"Error executing {tool_name}: {str(e)}"
 
                         # Append tool result message
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_id,
-                            "content": tool_result,
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": tool_result,
+                            }
+                        )
 
                     # Continue loop to call model again with tool results
 
