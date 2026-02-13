@@ -154,7 +154,7 @@ def test_llm_query_with_tools_single_call(sample_tools, sample_tool_handler):
     env = LocalREPL(lm_handler_address=("127.0.0.1", 12345))
 
     # Mock the socket communication
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         # First call: model returns tool call
         tool_call_response = {
             "tool_calls": [
@@ -187,7 +187,7 @@ def test_llm_query_with_tools_single_call(sample_tools, sample_tool_handler):
             )
         )
 
-        mock_socket.side_effect = [first_response.to_dict(), second_response.to_dict()]
+        mock_send.side_effect = [first_response, second_response]
 
         result = env._llm_query(
             "What's the weather in SF?",
@@ -196,7 +196,7 @@ def test_llm_query_with_tools_single_call(sample_tools, sample_tool_handler):
         )
 
         assert result == "The weather in San Francisco is Sunny, 72°F"
-        assert mock_socket.call_count == 2
+        assert mock_send.call_count == 2
 
 
 def test_llm_query_with_tools_multiple_rounds(sample_tools):
@@ -210,7 +210,7 @@ def test_llm_query_with_tools_multiple_rounds(sample_tools):
         call_count += 1
         return f"Result {call_count} for {tool_name}"
 
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         # First call: tool call
         tool_call_1 = {
             "tool_calls": [{"id": "call_1", "name": "get_weather", "arguments": {"city": "SF"}}],
@@ -233,7 +233,7 @@ def test_llm_query_with_tools_multiple_rounds(sample_tools):
                     usage_summary=make_usage_summary(),
                     execution_time=0.1,
                 )
-            ).to_dict(),
+            ),
             LMResponse.success_response(
                 RLMChatCompletion(
                     root_model="gpt-4",
@@ -242,7 +242,7 @@ def test_llm_query_with_tools_multiple_rounds(sample_tools):
                     usage_summary=make_usage_summary(),
                     execution_time=0.1,
                 )
-            ).to_dict(),
+            ),
             LMResponse.success_response(
                 RLMChatCompletion(
                     root_model="gpt-4",
@@ -251,10 +251,10 @@ def test_llm_query_with_tools_multiple_rounds(sample_tools):
                     usage_summary=make_usage_summary(),
                     execution_time=0.1,
                 )
-            ).to_dict(),
+            ),
         ]
 
-        mock_socket.side_effect = responses
+        mock_send.side_effect = responses
 
         result = env._llm_query(
             "Compare weather in SF and LA",
@@ -264,14 +264,14 @@ def test_llm_query_with_tools_multiple_rounds(sample_tools):
 
         assert result == final_response
         assert call_count == 2
-        assert mock_socket.call_count == 3
+        assert mock_send.call_count == 3
 
 
 def test_llm_query_without_tools_backward_compatible():
     """Test that llm_query without tools works as before (backward compatibility)."""
     env = LocalREPL(lm_handler_address=("127.0.0.1", 12345))
 
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         response = LMResponse.success_response(
             RLMChatCompletion(
                 root_model="gpt-4",
@@ -281,12 +281,12 @@ def test_llm_query_without_tools_backward_compatible():
                 execution_time=0.1,
             )
         )
-        mock_socket.return_value = response.to_dict()
+        mock_send.return_value = response
 
         result = env._llm_query("Test prompt")
 
         assert result == "Simple response"
-        assert mock_socket.call_count == 1
+        assert mock_send.call_count == 1
 
 
 def test_llm_query_tools_without_handler_raises(sample_tools):
@@ -304,7 +304,7 @@ def test_llm_query_tool_handler_exception(sample_tools):
     def failing_handler(tool_name, args):
         raise RuntimeError("Handler failed!")
 
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         # First call: tool call
         tool_call_response = {
             "tool_calls": [{"id": "call_1", "name": "get_weather", "arguments": {"city": "SF"}}],
@@ -322,7 +322,7 @@ def test_llm_query_tool_handler_exception(sample_tools):
                     usage_summary=make_usage_summary(),
                     execution_time=0.1,
                 )
-            ).to_dict(),
+            ),
             LMResponse.success_response(
                 RLMChatCompletion(
                     root_model="gpt-4",
@@ -331,10 +331,10 @@ def test_llm_query_tool_handler_exception(sample_tools):
                     usage_summary=make_usage_summary(),
                     execution_time=0.1,
                 )
-            ).to_dict(),
+            ),
         ]
 
-        mock_socket.side_effect = responses
+        mock_send.side_effect = responses
 
         result = env._llm_query(
             "What's the weather?",
@@ -352,13 +352,13 @@ def test_llm_query_max_iterations(sample_tools):
     def dummy_handler(tool_name, args):
         return "Result"
 
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         # Always return tool calls (infinite loop scenario)
         tool_call_response = {
             "tool_calls": [{"id": "call_x", "name": "get_weather", "arguments": {"city": "SF"}}],
             "content": None,
         }
-        mock_socket.return_value = LMResponse.success_response(
+        mock_send.return_value = LMResponse.success_response(
             RLMChatCompletion(
                 root_model="gpt-4",
                 prompt=[],
@@ -366,7 +366,7 @@ def test_llm_query_max_iterations(sample_tools):
                 usage_summary=make_usage_summary(),
                 execution_time=0.1,
             )
-        ).to_dict()
+        )
 
         result = env._llm_query(
             "Infinite loop test",
@@ -377,14 +377,14 @@ def test_llm_query_max_iterations(sample_tools):
         # Should return error after MAX_TOOL_ITERATIONS
         assert "__LLM_ERROR__|tool_loop_error" in result
         assert str(MAX_TOOL_ITERATIONS) in result
-        assert mock_socket.call_count == MAX_TOOL_ITERATIONS
+        assert mock_send.call_count == MAX_TOOL_ITERATIONS
 
 
 def test_llm_query_batched_with_tools(sample_tools, sample_tool_handler):
     """Test llm_query_batched with tools processes each prompt independently."""
     env = LocalREPL(lm_handler_address=("127.0.0.1", 12345))
 
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         # Each prompt gets: tool call -> final response
         responses = []
         cities = ["SF", "LA", "NYC"]
@@ -406,7 +406,7 @@ def test_llm_query_batched_with_tools(sample_tools, sample_tool_handler):
                         usage_summary=make_usage_summary(),
                         execution_time=0.1,
                     )
-                ).to_dict()
+                )
             )
             # Final response
             responses.append(
@@ -418,10 +418,10 @@ def test_llm_query_batched_with_tools(sample_tools, sample_tool_handler):
                         usage_summary=make_usage_summary(),
                         execution_time=0.1,
                     )
-                ).to_dict()
+                )
             )
 
-        mock_socket.side_effect = responses
+        mock_send.side_effect = responses
 
         prompts = [f"Weather in {city}?" for city in cities]
         results = env._llm_query_batched(
@@ -434,14 +434,14 @@ def test_llm_query_batched_with_tools(sample_tools, sample_tool_handler):
         for i, city in enumerate(cities):
             assert city in results[i]
         # 2 calls per prompt (tool call + final response)
-        assert mock_socket.call_count == 6
+        assert mock_send.call_count == 6
 
 
 def test_llm_query_batched_without_tools_backward_compatible():
     """Test that llm_query_batched without tools uses the simple batched path."""
     env = LocalREPL(lm_handler_address=("127.0.0.1", 12345))
 
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         # Batched response (single call)
         responses = [
             LMResponse.success_response(
@@ -458,7 +458,7 @@ def test_llm_query_batched_without_tools_backward_compatible():
 
         # Batched response is wrapped in a single socket call
         batched_response = LMResponse(chat_completions=[r.chat_completion for r in responses])
-        mock_socket.return_value = batched_response.to_dict()
+        mock_send.return_value = batched_response
 
         prompts = ["Prompt 0", "Prompt 1", "Prompt 2"]
         results = env._llm_query_batched(prompts)
@@ -467,7 +467,7 @@ def test_llm_query_batched_without_tools_backward_compatible():
         for i in range(3):
             assert results[i] == f"Response {i}"
         # Only 1 batched call
-        assert mock_socket.call_count == 1
+        assert mock_send.call_count == 1
 
 
 # =============================================================================
@@ -527,7 +527,7 @@ def test_tool_calls_with_multiple_tools_in_single_response(sample_tool_handler):
             return f"Time in {args['timezone']}: 12:00 PM"
         return "Unknown"
 
-    with patch("rlm.core.comms_utils.socket_request") as mock_socket:
+    with patch("rlm.environments.local_repl.send_lm_request") as mock_send:
         # Model returns multiple tool calls at once
         multi_tool_call = {
             "tool_calls": [
@@ -547,7 +547,7 @@ def test_tool_calls_with_multiple_tools_in_single_response(sample_tool_handler):
                     usage_summary=make_usage_summary(),
                     execution_time=0.1,
                 )
-            ).to_dict(),
+            ),
             LMResponse.success_response(
                 RLMChatCompletion(
                     root_model="gpt-4",
@@ -556,10 +556,10 @@ def test_tool_calls_with_multiple_tools_in_single_response(sample_tool_handler):
                     usage_summary=make_usage_summary(),
                     execution_time=0.1,
                 )
-            ).to_dict(),
+            ),
         ]
 
-        mock_socket.side_effect = responses
+        mock_send.side_effect = responses
 
         result = env._llm_query(
             "What's the time and weather in SF?",
@@ -568,4 +568,4 @@ def test_tool_calls_with_multiple_tools_in_single_response(sample_tool_handler):
         )
 
         assert result == final_response
-        assert mock_socket.call_count == 2
+        assert mock_send.call_count == 2
