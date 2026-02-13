@@ -321,7 +321,9 @@ class OpenAIClient(BaseLM):
         prompt: str | list[dict[str, Any]],
         model: str | None = None,
         response_format: dict | None = None,
-    ) -> str:
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+    ) -> str | dict:
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):

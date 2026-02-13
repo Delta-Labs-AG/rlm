@@ -242,7 +242,7 @@ class LocalREPL(NonIsolatedEnv):
         # Tool-calling loop
         messages = self._ensure_messages_format(prompt)
 
-        for iteration in range(MAX_TOOL_ITERATIONS):
+        for _iteration in range(MAX_TOOL_ITERATIONS):
             try:
                 request = LMRequest(
                     prompt=messages,
