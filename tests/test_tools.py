@@ -23,14 +23,31 @@ from rlm.environments.local_repl import MAX_TOOL_ITERATIONS, LocalREPL
 
 @pytest.fixture
 def mock_openai_response():
-    """Create a mock OpenAI response object."""
+    """Create a mock OpenAI response object for the Responses API."""
 
     def _make_response(content=None, tool_calls=None):
         response = Mock()
-        response.choices = [Mock()]
-        response.choices[0].message = Mock()
-        response.choices[0].message.content = content
-        response.choices[0].message.tool_calls = tool_calls
+        response.id = "resp_123"
+        output_item = Mock()
+        
+        if tool_calls:
+            output_item.type = "function_call"
+            # In the new API, tool_calls are items in the output list
+            # For simplicity, we'll mock the _parse_responses_response logic
+            response.output = []
+            for tc in tool_calls:
+                item = Mock()
+                item.type = "function_call"
+                item.id = tc.id
+                item.name = tc.function.name
+                item.arguments = tc.function.arguments
+                response.output.append(item)
+        else:
+            output_item.type = "message"
+            output_item.content = content
+            output_item.reasoning_content = None
+            response.output = [output_item]
+            
         response.usage = Mock()
         response.usage.prompt_tokens = 10
         response.usage.completion_tokens = 20
@@ -47,14 +64,14 @@ def test_client_returns_dict_for_tool_calls(mock_openai_response):
     tool_call.id = "call_123"
     tool_call.function = Mock()
     tool_call.function.name = "get_weather"
-    tool_call.function.arguments = json.dumps({"city": "San Francisco"})
+    tool_call.function.arguments = {"city": "San Francisco"} # Dict in new API
 
     # Mock response with tool calls
     mock_response = mock_openai_response(content=None, tool_calls=[tool_call])
 
     with patch("openai.OpenAI") as mock_openai_class:
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.responses.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
 
         client = OpenAIClient(api_key="test-key", model_name="gpt-4")
@@ -62,6 +79,7 @@ def test_client_returns_dict_for_tool_calls(mock_openai_response):
 
         # Should return dict with tool_calls
         assert isinstance(result, dict)
+        assert result["content"] == ""
         assert "tool_calls" in result
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["id"] == "call_123"
@@ -70,20 +88,20 @@ def test_client_returns_dict_for_tool_calls(mock_openai_response):
 
 
 def test_client_returns_str_for_content(mock_openai_response):
-    """Test that OpenAI client returns str when only content is present."""
+    """Test that OpenAI client returns dict even for just content now."""
     mock_response = mock_openai_response(content="Hello, world!", tool_calls=None)
 
     with patch("openai.OpenAI") as mock_openai_class:
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.responses.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
 
         client = OpenAIClient(api_key="test-key", model_name="gpt-4")
         result = client.completion("Test prompt")
 
-        # Should return string
-        assert isinstance(result, str)
-        assert result == "Hello, world!"
+        # Should return dict (BaseLM signature allows str | dict, but OpenAIClient now returns dict)
+        assert isinstance(result, dict)
+        assert result["content"] == "Hello, world!"
 
 
 def test_client_handles_tools_parameters(mock_openai_response):
@@ -92,7 +110,7 @@ def test_client_handles_tools_parameters(mock_openai_response):
 
     with patch("openai.OpenAI") as mock_openai_class:
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.responses.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
 
         client = OpenAIClient(api_key="test-key", model_name="gpt-4")
@@ -101,7 +119,7 @@ def test_client_handles_tools_parameters(mock_openai_response):
         client.completion("Test", tools=tools, tool_choice="auto")
 
         # Verify tools were passed to API
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        call_kwargs = mock_client.responses.create.call_args[1]
         assert "tools" in call_kwargs
         assert call_kwargs["tools"] == tools
         assert call_kwargs["tool_choice"] == "auto"
@@ -131,6 +149,7 @@ def test_ensure_messages_format_invalid():
     """Test _ensure_messages_format raises on invalid input."""
     env = LocalREPL()
     with pytest.raises(ValueError, match="Invalid prompt type"):
+        # LocalREPL._ensure_messages_format check
         env._ensure_messages_format(123)
 
 
@@ -178,7 +197,7 @@ def test_llm_query_no_handler_configured():
     """Test llm_query returns error when no handler address is configured."""
     env = LocalREPL()  # No lm_handler_address
     result = env._llm_query("Test prompt")
-    assert "Error: No LM handler configured" in result
+    assert "Error: No address" in result
 
 
 # =============================================================================

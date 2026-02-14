@@ -199,7 +199,7 @@ DEFAULT_PRIME_INTELLECT_BASE_URL = "https://api.pinference.ai/api/v1/"
 
 class OpenAIClient(BaseLM):
     """
-    LM Client for running models with the OpenAI API. Works with vLLM as well.
+    LM Client for running models with the OpenAI Responses API.
     """
 
     def __init__(
@@ -209,13 +209,11 @@ class OpenAIClient(BaseLM):
         base_url: str | None = None,
         reasoning_effort: str | None = None,
         beta_responses: bool = False,
-        use_responses_api: bool = False,
         **kwargs,
     ):
         super().__init__(model_name=model_name, **kwargs)
         self.reasoning_effort = reasoning_effort  # none, minimal, low, medium, high, xhigh
         self.beta_responses = beta_responses
-        self.use_responses_api = use_responses_api
 
         if api_key is None:
             if base_url == "https://api.openai.com/v1" or base_url is None:
@@ -225,7 +223,6 @@ class OpenAIClient(BaseLM):
             elif base_url == "https://ai-gateway.vercel.sh/v1":
                 api_key = DEFAULT_VERCEL_API_KEY
 
-        # For vLLM, set base_url to local vLLM server address.
         import httpx
 
         _timeout = httpx.Timeout(600.0, connect=10.0)
@@ -243,6 +240,10 @@ class OpenAIClient(BaseLM):
         self.model_output_tokens: dict[str, int] = defaultdict(int)
         self.model_total_tokens: dict[str, int] = defaultdict(int)
 
+        # Last call tracking
+        self.last_prompt_tokens = 0
+        self.last_completion_tokens = 0
+
     def _prepare_responses_request(
         self,
         prompt: str | list[dict[str, Any]],
@@ -250,8 +251,9 @@ class OpenAIClient(BaseLM):
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         response_format: dict | None = None,
+        previous_response_id: str | None = None,
     ) -> dict[str, Any]:
-        """Prepare request for the new Responses API (/v1/responses)."""
+        """Prepare request for the Responses API (/v1/responses)."""
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         else:
@@ -287,20 +289,26 @@ class OpenAIClient(BaseLM):
         if response_format:
             kwargs["output_format"] = response_format
 
+        if previous_response_id:
+            kwargs["previous_response_id"] = previous_response_id
+
         return kwargs
 
-    def _parse_responses_response(self, response: Any) -> str | dict:
-        """Parse the new Response object into RLM format."""
+    def _parse_responses_response(self, response: Any) -> dict[str, Any]:
+        """Parse the Response object into RLM format."""
         output_items = getattr(response, "output", [])
         
         tool_calls = []
         final_content = ""
+        thought = ""
 
         for item in output_items:
             # Check for different item types in the new API
             if hasattr(item, "type"):
                 if item.type == "message":
-                    final_content = getattr(item, "content", "")
+                    final_content += getattr(item, "content", "")
+                    if hasattr(item, "reasoning_content") and item.reasoning_content:
+                        thought += item.reasoning_content
                 elif item.type == "function_call":
                     tool_calls.append({
                         "id": item.id,
@@ -308,13 +316,12 @@ class OpenAIClient(BaseLM):
                         "arguments": item.arguments,
                     })
         
-        if tool_calls:
-            return {
-                "tool_calls": tool_calls,
-                "content": final_content or None
-            }
-        
-        return final_content
+        return {
+            "content": final_content,
+            "thought": thought or None,
+            "tool_calls": tool_calls or None,
+            "response_id": getattr(response, "id", None)
+        }
 
     @retry(**_RETRY_CONFIG)
     def completion(
@@ -324,11 +331,12 @@ class OpenAIClient(BaseLM):
         response_format: dict | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
-    ) -> str | dict:
+        previous_response_id: str | None = None,
+    ) -> dict[str, Any]:
         if isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
+            pass
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
-            messages = prompt
+            pass
         else:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
@@ -336,23 +344,13 @@ class OpenAIClient(BaseLM):
         if not model:
             raise ValueError("Model name is required for OpenAI client.")
 
-        extra_body = {}
-        if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
-            extra_body["usage"] = {"include": True}
-
-        kwargs = {"model": model, "messages": messages}
+        kwargs = self._prepare_responses_request(
+            prompt, model, tools, tool_choice, response_format, previous_response_id
+        )
         if self.beta_responses:
             kwargs["extra_headers"] = {"OpenAI-Beta": "responses=true"}
-        if extra_body:
-            kwargs["extra_body"] = extra_body
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-        if tools is not None:
-            kwargs["tools"] = tools
-            if tool_choice is not None:
-                kwargs["tool_choice"] = tool_choice
 
         sem = _get_semaphore(model)
         if not sem.acquire(timeout=120):
@@ -360,34 +358,18 @@ class OpenAIClient(BaseLM):
         try:
             t0 = request_tracker.start_request(model)
             try:
-                if self.use_responses_api:
-                    resp_kwargs = self._prepare_responses_request(
-                        prompt, model, tools, tool_choice, response_format
-                    )
-                    response = self.client.responses.create(**resp_kwargs)
-                    content = self._parse_responses_response(response)
-                    # Note: Usage tracking for Responses API might need adjustment
-                    usage = getattr(response, "usage", None)
-                else:
-                    response = self.client.chat.completions.create(**kwargs)
-                    self._track_cost(response, model)
-                    usage = getattr(response, "usage", None)
-                    
-                    message = response.choices[0].message
-                    if hasattr(message, "tool_calls") and message.tool_calls:
-                        content = {
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "arguments": json.loads(tc.function.arguments),
-                                }
-                                for tc in message.tool_calls
-                            ],
-                            "content": message.content,
-                        }
-                    else:
-                        content = message.content or ""
+                response = self.client.responses.create(**kwargs)
+                parsed_result = self._parse_responses_response(response)
+                
+                # Usage tracking
+                usage = getattr(response, "usage", None)
+                if usage:
+                    self.model_call_counts[model] += 1
+                    self.model_input_tokens[model] += usage.prompt_tokens
+                    self.model_output_tokens[model] += usage.completion_tokens
+                    self.model_total_tokens[model] += usage.total_tokens
+                    self.last_prompt_tokens = usage.prompt_tokens
+                    self.last_completion_tokens = usage.completion_tokens
 
                 request_tracker.end_request(
                     model,
@@ -395,7 +377,7 @@ class OpenAIClient(BaseLM):
                     input_tokens=usage.prompt_tokens if usage else 0,
                     output_tokens=usage.completion_tokens if usage else 0,
                 )
-                return content
+                return parsed_result
             except BaseException as exc:
                 request_tracker.end_request(model, t0, error=exc)
                 raise
@@ -410,11 +392,12 @@ class OpenAIClient(BaseLM):
         response_format: dict | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
-    ) -> str | dict:
+        previous_response_id: str | None = None,
+    ) -> dict[str, Any]:
         if isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
+            pass
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
-            messages = prompt
+            pass
         else:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
@@ -422,23 +405,13 @@ class OpenAIClient(BaseLM):
         if not model:
             raise ValueError("Model name is required for OpenAI client.")
 
-        extra_body = {}
-        if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
-            extra_body["usage"] = {"include": True}
-
-        kwargs = {"model": model, "messages": messages}
+        kwargs = self._prepare_responses_request(
+            prompt, model, tools, tool_choice, response_format, previous_response_id
+        )
         if self.beta_responses:
             kwargs["extra_headers"] = {"OpenAI-Beta": "responses=true"}
-        if extra_body:
-            kwargs["extra_body"] = extra_body
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-        if tools is not None:
-            kwargs["tools"] = tools
-            if tool_choice is not None:
-                kwargs["tool_choice"] = tool_choice
 
         sem = _get_semaphore(model)
         acquired = await asyncio.to_thread(sem.acquire, timeout=120)
@@ -447,33 +420,18 @@ class OpenAIClient(BaseLM):
         try:
             t0 = request_tracker.start_request(model)
             try:
-                if self.use_responses_api:
-                    resp_kwargs = self._prepare_responses_request(
-                        prompt, model, tools, tool_choice, response_format
-                    )
-                    response = await self.async_client.responses.create(**resp_kwargs)
-                    content = self._parse_responses_response(response)
-                    usage = getattr(response, "usage", None)
-                else:
-                    response = await self.async_client.chat.completions.create(**kwargs)
-                    self._track_cost(response, model)
-                    usage = getattr(response, "usage", None)
-                    
-                    message = response.choices[0].message
-                    if hasattr(message, "tool_calls") and message.tool_calls:
-                        content = {
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "arguments": json.loads(tc.function.arguments),
-                                }
-                                for tc in message.tool_calls
-                            ],
-                            "content": message.content,
-                        }
-                    else:
-                        content = message.content or ""
+                response = await self.async_client.responses.create(**kwargs)
+                parsed_result = self._parse_responses_response(response)
+                
+                # Usage tracking
+                usage = getattr(response, "usage", None)
+                if usage:
+                    self.model_call_counts[model] += 1
+                    self.model_input_tokens[model] += usage.prompt_tokens
+                    self.model_output_tokens[model] += usage.completion_tokens
+                    self.model_total_tokens[model] += usage.total_tokens
+                    self.last_prompt_tokens = usage.prompt_tokens
+                    self.last_completion_tokens = usage.completion_tokens
 
                 request_tracker.end_request(
                     model,
@@ -481,27 +439,12 @@ class OpenAIClient(BaseLM):
                     input_tokens=usage.prompt_tokens if usage else 0,
                     output_tokens=usage.completion_tokens if usage else 0,
                 )
-                return content
+                return parsed_result
             except BaseException as exc:
                 request_tracker.end_request(model, t0, error=exc)
                 raise
         finally:
             sem.release()
-
-    def _track_cost(self, response: openai.ChatCompletion, model: str):
-        self.model_call_counts[model] += 1
-
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            raise ValueError("No usage data received. Tracking tokens not possible.")
-
-        self.model_input_tokens[model] += usage.prompt_tokens
-        self.model_output_tokens[model] += usage.completion_tokens
-        self.model_total_tokens[model] += usage.total_tokens
-
-        # Track last call for handler to read
-        self.last_prompt_tokens = usage.prompt_tokens
-        self.last_completion_tokens = usage.completion_tokens
 
     def get_usage_summary(self) -> UsageSummary:
         model_summaries = {}
