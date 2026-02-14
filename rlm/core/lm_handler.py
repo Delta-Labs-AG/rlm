@@ -32,22 +32,8 @@ class LMRequestHandler(StreamRequestHandler):
             request = LMRequest.from_dict(request_data)
             handler: LMHandler = self.server.lm_handler  # type: ignore
 
-            if request.is_batched:
-                # Batched request: process multiple prompts concurrently
-                response = self._handle_batched(request, handler)
-            elif request.prompt:
-                # Single request: process one prompt
-                response = self._handle_single(request, handler)
-            else:
-                response = LMResponse.error_response("Missing 'prompt' or 'prompts' in request.")
-
-            # Trigger callback if registered
-            if handler.on_request:
-                try:
-                    handler.on_request(request, response)
-                except Exception:
-                    # Don't let callback failure kill the request
-                    pass
+            # Use the unified handler logic
+            response = handler.handle_request(request)
 
             self._safe_send(response)
 
@@ -69,84 +55,6 @@ class LMRequestHandler(StreamRequestHandler):
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             # Client disconnected - silently ignore
             return False
-
-    def _handle_single(self, request: LMRequest, handler: "LMHandler") -> LMResponse:
-        """Handle a single prompt request."""
-        client = handler.get_client(request.model, request.depth)
-
-        start_time = time.perf_counter()
-        content = client.completion(request.prompt, response_format=request.response_format)
-        end_time = time.perf_counter()
-
-        model_usage = client.get_last_usage()
-        root_model = request.model or client.model_name
-        usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
-        return LMResponse.success_response(
-            chat_completion=RLMChatCompletion(
-                root_model=root_model,
-                prompt=request.prompt,
-                response=content,
-                usage_summary=usage_summary,
-                execution_time=end_time - start_time,
-            )
-        )
-
-    def _handle_batched(self, request: LMRequest, handler: "LMHandler") -> LMResponse:
-        """Handle a batched prompts request using async for concurrency."""
-        client = handler.get_client(request.model, request.depth)
-
-        start_time = time.perf_counter()
-
-        async def run_all():
-            formats = request.response_formats or [None] * len(request.prompts)
-            all_results = []
-            prompts_and_formats = list(zip(request.prompts, formats, strict=True))
-            for i in range(0, len(prompts_and_formats), _BATCH_CHUNK_SIZE):
-                chunk = prompts_and_formats[i : i + _BATCH_CHUNK_SIZE]
-                chunk_results = await asyncio.gather(
-                    *[client.acompletion(prompt, response_format=fmt) for prompt, fmt in chunk],
-                    return_exceptions=True,
-                )
-                all_results.extend(chunk_results)
-            return all_results
-
-        results = asyncio.run(run_all())
-        end_time = time.perf_counter()
-
-        total_time = end_time - start_time
-        model_usage = client.get_last_usage()
-        root_model = request.model or client.model_name
-        usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
-
-        chat_completions = []
-        for prompt, result in zip(request.prompts, results, strict=True):
-            if isinstance(result, Exception):
-                error_type = type(result).__name__
-                status_code = getattr(result, "status_code", None)
-                chat_completions.append(
-                    RLMChatCompletion(
-                        root_model=root_model,
-                        prompt=prompt,
-                        response="",
-                        usage_summary=usage_summary,
-                        execution_time=total_time / len(request.prompts),
-                        error=str(result),
-                        error_type=error_type,
-                        status_code=status_code,
-                    )
-                )
-            else:
-                chat_completions.append(
-                    RLMChatCompletion(
-                        root_model=root_model,
-                        prompt=prompt,
-                        response=result,
-                        usage_summary=usage_summary,
-                        execution_time=total_time / len(request.prompts),
-                    )
-                )
-
-        return LMResponse.batched_success_response(chat_completions=chat_completions)
 
 
 class ThreadingLMServer(ThreadingTCPServer):
@@ -186,6 +94,116 @@ class LMHandler:
     def register_client(self, model_name: str, client: BaseLM) -> None:
         """Register a client for a specific model name."""
         self.clients[model_name] = client
+
+    def handle_request(self, request: LMRequest) -> LMResponse:
+        """Process an LM request synchronously."""
+        try:
+            if request.is_batched:
+                response = asyncio.run(self._handle_request_async(request))
+            elif request.prompt:
+                response = self._handle_single(request)
+            else:
+                response = LMResponse.error_response("Missing 'prompt' or 'prompts' in request.")
+
+            if self.on_request:
+                try:
+                    self.on_request(request, response)
+                except Exception:
+                    pass
+
+            return response
+        except Exception as e:
+            return LMResponse.error_response(str(e))
+
+    async def _handle_request_async(self, request: LMRequest) -> LMResponse:
+        """Process an LM request asynchronously."""
+        try:
+            if request.is_batched:
+                return await self._handle_batched_async(request)
+            elif request.prompt:
+                # Reuse synchronous handle_single for now, or implement async version
+                # For consistency with socket server which uses threads, we can run in executor if needed
+                return await asyncio.to_thread(self._handle_single, request)
+            else:
+                return LMResponse.error_response("Missing 'prompt' or 'prompts' in request.")
+        except Exception as e:
+            return LMResponse.error_response(str(e))
+
+    def _handle_single(self, request: LMRequest) -> LMResponse:
+        """Handle a single prompt request."""
+        client = self.get_client(request.model, request.depth)
+
+        start_time = time.perf_counter()
+        content = client.completion(request.prompt, response_format=request.response_format)
+        end_time = time.perf_counter()
+
+        model_usage = client.get_last_usage()
+        root_model = request.model or client.model_name
+        usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
+        return LMResponse.success_response(
+            chat_completion=RLMChatCompletion(
+                root_model=root_model,
+                prompt=request.prompt,
+                response=content,
+                usage_summary=usage_summary,
+                execution_time=end_time - start_time,
+            )
+        )
+
+    async def _handle_batched_async(self, request: LMRequest) -> LMResponse:
+        """Handle a batched prompts request using async for concurrency."""
+        client = self.get_client(request.model, request.depth)
+        prompts = request.prompts or []
+
+        start_time = time.perf_counter()
+
+        formats = request.response_formats or [None] * len(prompts)
+        all_results = []
+        prompts_and_formats = list(zip(prompts, formats, strict=True))
+        for i in range(0, len(prompts_and_formats), _BATCH_CHUNK_SIZE):
+            chunk = prompts_and_formats[i : i + _BATCH_CHUNK_SIZE]
+            chunk_results = await asyncio.gather(
+                *[client.acompletion(prompt, response_format=fmt) for prompt, fmt in chunk],
+                return_exceptions=True,
+            )
+            all_results.extend(chunk_results)
+
+        end_time = time.perf_counter()
+
+        total_time = end_time - start_time
+        model_usage = client.get_last_usage()
+        root_model = request.model or client.model_name
+        usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
+
+        chat_completions = []
+        for prompt, result in zip(prompts, all_results, strict=True):
+            if isinstance(result, Exception):
+                error_type = type(result).__name__
+                status_code = getattr(result, "status_code", None)
+                chat_completions.append(
+                    RLMChatCompletion(
+                        root_model=root_model,
+                        prompt=prompt,
+                        response="",
+                        usage_summary=usage_summary,
+                        execution_time=total_time / len(prompts),
+                        error=str(result),
+                        error_type=error_type,
+                        status_code=status_code,
+                    )
+                )
+            else:
+                chat_completions.append(
+                    RLMChatCompletion(
+                        root_model=root_model,
+                        prompt=prompt,
+                        response=result,
+                        usage_summary=usage_summary,
+                        execution_time=total_time / len(prompts),
+                    )
+                )
+
+        return LMResponse.batched_success_response(chat_completions=chat_completions)
 
     def get_client(self, model: str | None = None, depth: int = 0) -> BaseLM:
         """Get client by model name or depth, or return default.

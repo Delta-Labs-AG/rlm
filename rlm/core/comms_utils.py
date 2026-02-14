@@ -33,6 +33,7 @@ class LMRequest:
     response_formats: list[dict | None] | None = None
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
+    metadata: dict[str, Any] | None = None
 
     @property
     def is_batched(self) -> bool:
@@ -57,6 +58,8 @@ class LMRequest:
             d["tools"] = self.tools
         if self.tool_choice is not None:
             d["tool_choice"] = self.tool_choice
+        if self.metadata is not None:
+            d["metadata"] = self.metadata
         return d
 
     @classmethod
@@ -71,6 +74,7 @@ class LMRequest:
             response_formats=data.get("response_formats"),
             tools=data.get("tools"),
             tool_choice=data.get("tool_choice"),
+            metadata=data.get("metadata"),
         )
 
 
@@ -84,6 +88,7 @@ class LMResponse:
     error: str | None = None
     chat_completion: RLMChatCompletion | None = None
     chat_completions: list[RLMChatCompletion] | None = None
+    metadata: dict[str, Any] | None = None
 
     @property
     def success(self) -> bool:
@@ -97,29 +102,16 @@ class LMResponse:
 
     def to_dict(self) -> dict:
         """Convert to dict, excluding None values."""
+        d = {}
         if self.error is not None:
-            return {
-                "error": self.error,
-                "chat_completion": None,
-                "chat_completions": None,
-            }
+            d["error"] = self.error
         if self.chat_completions is not None:
-            return {
-                "chat_completions": [c.to_dict() for c in self.chat_completions],
-                "chat_completion": None,
-                "error": None,
-            }
+            d["chat_completions"] = [c.to_dict() for c in self.chat_completions]
         if self.chat_completion is not None:
-            return {
-                "chat_completion": self.chat_completion.to_dict(),
-                "chat_completions": None,
-                "error": None,
-            }
-        return {
-            "error": "No chat completion or error provided.",
-            "chat_completion": None,
-            "chat_completions": None,
-        }
+            d["chat_completion"] = self.chat_completion.to_dict()
+        if self.metadata is not None:
+            d["metadata"] = self.metadata
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "LMResponse":
@@ -136,6 +128,7 @@ class LMResponse:
             error=data.get("error"),
             chat_completion=chat_completion,
             chat_completions=chat_completions,
+            metadata=data.get("metadata"),
         )
 
     @classmethod

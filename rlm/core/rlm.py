@@ -15,6 +15,7 @@ from rlm.core.types import (
     RLMMetadata,
 )
 from rlm.environments import BaseEnv, SupportsPersistence, get_environment
+from rlm.environments.local_repl import DirectREPL, SocketREPL
 from rlm.logger import RLMLogger, VerbosePrinter
 from rlm.utils.parsing import (
     find_code_blocks,
@@ -127,12 +128,9 @@ class RLM:
             self.verbose.print_metadata(metadata)
 
     @contextmanager
-    def _spawn_completion_context(self, prompt: str | dict[str, Any]):
+    def _spawn_completion_context(self, prompt: str | dict[str, Any], metadata: dict[str, Any] | None = None):
         """
         Spawn an LM handler and environment for a single completion call.
-
-        When persistent=True, the environment is reused across calls.
-        When persistent=False (default), creates fresh environment each call.
         """
         # Create client and wrap in handler
         client: BaseLM = get_client(self.backend, self.backend_kwargs)
@@ -146,32 +144,39 @@ class RLM:
             client, other_backend_client=other_backend_client, on_request=self.on_request
         )
 
-        # Register other clients to be available as sub-call options (by model name)
+        # Register other clients
         if self.other_backends and self.other_backend_kwargs:
             for backend, kwargs in zip(self.other_backends, self.other_backend_kwargs, strict=True):
                 other_client: BaseLM = get_client(backend, kwargs)
                 lm_handler.register_client(other_client.model_name, other_client)
 
-        lm_handler.start()
-
         # Environment: reuse if persistent, otherwise create fresh
         if self.persistent and self._persistent_env is not None:
             environment = self._persistent_env
-            # Defensive check: ensure environment supports persistence methods
             if not self._env_supports_persistence(environment):
-                raise RuntimeError(
-                    f"Persistent environment of type '{type(environment).__name__}' does not "
-                    f"implement required methods (update_handler_address, add_context, get_context_count). "
-                    f"This should have been caught at initialization."
-                )
-            environment.update_handler_address((lm_handler.host, lm_handler.port))
+                raise RuntimeError(f"Persistent environment '{type(environment).__name__}' not supported.")
+            
+            if isinstance(environment, SocketREPL):
+                lm_handler.start()
+                environment.update_handler_address((lm_handler.host, lm_handler.port))
+            
             environment.add_context(prompt)
         else:
             env_kwargs = self.environment_kwargs.copy()
-            env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
             env_kwargs["context_payload"] = prompt
-            env_kwargs["depth"] = self.depth + 1  # Environment depth is RLM depth + 1
-            environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
+            env_kwargs["depth"] = self.depth + 1
+            env_kwargs["metadata"] = metadata or {}
+
+            # Strategy: If local, default to DirectREPL (no socket)
+            # If backend is explicitly set to 'socket', use SocketREPL
+            env_backend = env_kwargs.pop("env_backend", "direct")
+            
+            if self.environment_type == "local" and env_backend == "direct":
+                environment = DirectREPL(lm_handler=lm_handler, **env_kwargs)
+            else:
+                lm_handler.start()
+                env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
+                environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
 
             if self.persistent:
                 self._persistent_env = environment
@@ -184,7 +189,7 @@ class RLM:
                 environment.cleanup()
 
     @asynccontextmanager
-    async def _spawn_acompletion_context(self, prompt: str | dict[str, Any]):
+    async def _spawn_acompletion_context(self, prompt: str | dict[str, Any], metadata: dict[str, Any] | None = None):
         """
         Spawn an LM handler and environment for a single completion call (async version).
         """
@@ -200,32 +205,37 @@ class RLM:
             client, other_backend_client=other_backend_client, on_request=self.on_request
         )
 
-        # Register other clients to be available as sub-call options (by model name)
+        # Register other clients
         if self.other_backends and self.other_backend_kwargs:
             for backend, kwargs in zip(self.other_backends, self.other_backend_kwargs, strict=True):
                 other_client: BaseLM = get_client(backend, kwargs)
                 lm_handler.register_client(other_client.model_name, other_client)
 
-        lm_handler.start()
-
         # Environment: reuse if persistent, otherwise create fresh
         if self.persistent and self._persistent_env is not None:
             environment = self._persistent_env
-            # Defensive check: ensure environment supports persistence methods
             if not self._env_supports_persistence(environment):
-                raise RuntimeError(
-                    f"Persistent environment of type '{type(environment).__name__}' does not "
-                    f"implement required methods (update_handler_address, add_context, get_context_count). "
-                    f"This should have been caught at initialization."
-                )
-            environment.update_handler_address((lm_handler.host, lm_handler.port))
+                raise RuntimeError(f"Persistent environment '{type(environment).__name__}' not supported.")
+            
+            if isinstance(environment, SocketREPL):
+                lm_handler.start()
+                environment.update_handler_address((lm_handler.host, lm_handler.port))
+            
             environment.add_context(prompt)
         else:
             env_kwargs = self.environment_kwargs.copy()
-            env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
             env_kwargs["context_payload"] = prompt
-            env_kwargs["depth"] = self.depth + 1  # Environment depth is RLM depth + 1
-            environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
+            env_kwargs["depth"] = self.depth + 1
+            env_kwargs["metadata"] = metadata or {}
+
+            env_backend = env_kwargs.pop("env_backend", "direct")
+            
+            if self.environment_type == "local" and env_backend == "direct":
+                environment = DirectREPL(lm_handler=lm_handler, **env_kwargs)
+            else:
+                lm_handler.start()
+                env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
+                environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
 
             if self.persistent:
                 self._persistent_env = environment
@@ -235,9 +245,7 @@ class RLM:
         finally:
             lm_handler.stop()
             if not self.persistent and hasattr(environment, "cleanup"):
-                # Run cleanup in a thread if it might block, but here we just call it
-                if hasattr(environment, "cleanup"):
-                    environment.cleanup()
+                environment.cleanup()
 
     def _setup_prompt(self, prompt: str | dict[str, Any]) -> list[dict[str, Any]]:
         """
@@ -252,28 +260,27 @@ class RLM:
         return message_history
 
     def completion(
-        self, prompt: str | dict[str, Any], root_prompt: str | None = None
+        self,
+        prompt: str | dict[str, Any],
+        root_prompt: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> RLMChatCompletion:
         """
-        Recursive Language Model completion call. This is the main entry point for querying an RLM, and
-        can replace a regular LM completion call.
-
-        Spawns its own environment and LM handler for the duration of this call.
+        Recursive Language Model completion call.
 
         Args:
-            prompt: A single string or dictionary of messages to pass as context to the model.
-            root_prompt: We allow the RLM's root LM to see a (small) prompt that the user specifies. A common example of this
-            is if the user is asking the RLM to answer a question, we can pass the question as the root prompt.
+            prompt: Context for the model.
+            root_prompt: Optional user-specified prompt for the root LM.
+            metadata: Optional metadata for tracing/observability.
         Returns:
-            A final answer as a string.
+            RLMChatCompletion object.
         """
         time_start = time.perf_counter()
 
-        # If we're at max depth, the RLM is an LM, so we fallback to the regular LM.
         if self.depth >= self.max_depth:
             return self._fallback_answer(prompt)
 
-        with self._spawn_completion_context(prompt) as (lm_handler, environment):
+        with self._spawn_completion_context(prompt, metadata=metadata) as (lm_handler, environment):
             message_history = self._setup_prompt(prompt)
             code_executed = False  # Track whether any REPL code has run
 
@@ -372,6 +379,7 @@ class RLM:
         prompt: str | dict[str, Any],
         root_prompt: str | None = None,
         on_iteration: Any | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> RLMChatCompletion:
         """
         Async Recursive Language Model completion call.
@@ -382,7 +390,7 @@ class RLM:
         if self.depth >= self.max_depth:
             return await self._afallback_answer(prompt)
 
-        async with self._spawn_acompletion_context(prompt) as (lm_handler, environment):
+        async with self._spawn_acompletion_context(prompt, metadata=metadata) as (lm_handler, environment):
             message_history = self._setup_prompt(prompt)
             code_executed = False  # Track whether any REPL code has run
 
