@@ -1,9 +1,9 @@
 [project]
 name = "rlms"
 authors = [
-    {name = "Alex Zhang", email = "altzhang@mit.edu"},
+    {name = "Nick Smit", email = "nick.smit@gmail.com"},
 ]
-version = "0.1.0-delta.10"
+version = "0.1.0-delta.11"
 description = "Recursive Language Models."
 readme = "README.md"
 license = "MIT"
