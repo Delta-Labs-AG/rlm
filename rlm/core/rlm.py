@@ -1,5 +1,6 @@
+import asyncio
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from rlm.clients import BaseLM, get_client
@@ -52,6 +53,7 @@ class RLM:
         logger: RLMLogger | None = None,
         verbose: bool = False,
         persistent: bool = False,
+        on_request: Any | None = None,
     ):
         """
         Args:
@@ -68,6 +70,7 @@ class RLM:
             logger: The logger to use for the RLM.
             verbose: Whether to print verbose output in rich to console.
             persistent: If True, reuse the environment across completion() calls for multi-turn conversations.
+            on_request: Optional callback for LMHandler requests (e.g. for Inngest integration).
         """
         # Store config for spawning per-completion
         self.backend = backend
@@ -93,6 +96,7 @@ class RLM:
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
+        self.on_request = on_request
 
         # Persistence support
         self.persistent = persistent
@@ -138,7 +142,9 @@ class RLM:
         if self.other_backends and self.other_backend_kwargs:
             other_backend_client = get_client(self.other_backends[0], self.other_backend_kwargs[0])
 
-        lm_handler = LMHandler(client, other_backend_client=other_backend_client)
+        lm_handler = LMHandler(
+            client, other_backend_client=other_backend_client, on_request=self.on_request
+        )
 
         # Register other clients to be available as sub-call options (by model name)
         if self.other_backends and self.other_backend_kwargs:
@@ -176,6 +182,62 @@ class RLM:
             lm_handler.stop()
             if not self.persistent and hasattr(environment, "cleanup"):
                 environment.cleanup()
+
+    @asynccontextmanager
+    async def _spawn_acompletion_context(self, prompt: str | dict[str, Any]):
+        """
+        Spawn an LM handler and environment for a single completion call (async version).
+        """
+        # Create client and wrap in handler
+        client: BaseLM = get_client(self.backend, self.backend_kwargs)
+
+        # Create other_backend_client if provided (for depth=1 routing)
+        other_backend_client: BaseLM | None = None
+        if self.other_backends and self.other_backend_kwargs:
+            other_backend_client = get_client(self.other_backends[0], self.other_backend_kwargs[0])
+
+        lm_handler = LMHandler(
+            client, other_backend_client=other_backend_client, on_request=self.on_request
+        )
+
+        # Register other clients to be available as sub-call options (by model name)
+        if self.other_backends and self.other_backend_kwargs:
+            for backend, kwargs in zip(self.other_backends, self.other_backend_kwargs, strict=True):
+                other_client: BaseLM = get_client(backend, kwargs)
+                lm_handler.register_client(other_client.model_name, other_client)
+
+        lm_handler.start()
+
+        # Environment: reuse if persistent, otherwise create fresh
+        if self.persistent and self._persistent_env is not None:
+            environment = self._persistent_env
+            # Defensive check: ensure environment supports persistence methods
+            if not self._env_supports_persistence(environment):
+                raise RuntimeError(
+                    f"Persistent environment of type '{type(environment).__name__}' does not "
+                    f"implement required methods (update_handler_address, add_context, get_context_count). "
+                    f"This should have been caught at initialization."
+                )
+            environment.update_handler_address((lm_handler.host, lm_handler.port))
+            environment.add_context(prompt)
+        else:
+            env_kwargs = self.environment_kwargs.copy()
+            env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
+            env_kwargs["context_payload"] = prompt
+            env_kwargs["depth"] = self.depth + 1  # Environment depth is RLM depth + 1
+            environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
+
+            if self.persistent:
+                self._persistent_env = environment
+
+        try:
+            yield lm_handler, environment
+        finally:
+            lm_handler.stop()
+            if not self.persistent and hasattr(environment, "cleanup"):
+                # Run cleanup in a thread if it might block, but here we just call it
+                if hasattr(environment, "cleanup"):
+                    environment.cleanup()
 
     def _setup_prompt(self, prompt: str | dict[str, Any]) -> list[dict[str, Any]]:
         """
@@ -305,6 +367,121 @@ class RLM:
                 execution_time=time_end - time_start,
             )
 
+    async def acompletion(
+        self,
+        prompt: str | dict[str, Any],
+        root_prompt: str | None = None,
+        on_iteration: Any | None = None,
+    ) -> RLMChatCompletion:
+        """
+        Async Recursive Language Model completion call.
+        """
+        time_start = time.perf_counter()
+
+        # If we're at max depth, the RLM is an LM, so we fallback to the regular LM.
+        if self.depth >= self.max_depth:
+            return await self._afallback_answer(prompt)
+
+        async with self._spawn_acompletion_context(prompt) as (lm_handler, environment):
+            message_history = self._setup_prompt(prompt)
+            code_executed = False  # Track whether any REPL code has run
+
+            for i in range(self.max_iterations):
+                # Current prompt = message history + additional prompt suffix
+                context_count = (
+                    environment.get_context_count()
+                    if isinstance(environment, SupportsPersistence)
+                    else 1
+                )
+                history_count = (
+                    environment.get_history_count()
+                    if isinstance(environment, SupportsPersistence)
+                    else 0
+                )
+                current_prompt = message_history + [
+                    build_user_prompt(root_prompt, i, context_count, history_count)
+                ]
+
+                iteration: RLMIteration = await self._acompletion_turn(
+                    prompt=current_prompt,
+                    lm_handler=lm_handler,
+                    environment=environment,
+                )
+
+                # Update code execution tracking
+                if iteration.code_blocks:
+                    code_executed = True
+
+                # Check if RLM is done and has a final answer.
+                final_answer = find_final_answer(iteration.response, environment=environment)
+                iteration.final_answer = final_answer
+
+                # Guard: reject FINAL_VAR if no REPL code has been executed yet.
+                if final_answer is not None and not code_executed:
+                    final_answer = None
+                    iteration.final_answer = None
+
+                # If logger is used, log the iteration.
+                if self.logger:
+                    self.logger.log(iteration)
+
+                # Callback for iteration (can be async)
+                if on_iteration:
+                    if asyncio.iscoroutinefunction(on_iteration):
+                        await on_iteration(iteration, i + 1)
+                    else:
+                        on_iteration(iteration, i + 1)
+
+                # Verbose output for this iteration
+                self.verbose.print_iteration(iteration, i + 1)
+
+                if final_answer is not None:
+                    time_end = time.perf_counter()
+                    usage = lm_handler.get_usage_summary()
+                    self.verbose.print_final_answer(final_answer)
+                    self.verbose.print_summary(i + 1, time_end - time_start, usage.to_dict())
+
+                    # Store message history in persistent environment
+                    if self.persistent and isinstance(environment, SupportsPersistence):
+                        environment.add_history(message_history)
+
+                    return RLMChatCompletion(
+                        root_model=self.backend_kwargs.get("model_name", "unknown")
+                        if self.backend_kwargs
+                        else "unknown",
+                        prompt=prompt,
+                        response=final_answer,
+                        usage_summary=usage,
+                        execution_time=time_end - time_start,
+                    )
+
+                # Format the iteration for the next prompt.
+                new_messages = format_iteration(iteration)
+
+                # Update message history with the new messages.
+                message_history.extend(new_messages)
+
+            # Default behavior: we run out of iterations, provide one final answer
+            time_end = time.perf_counter()
+            final_answer = await self._adefault_answer(message_history, lm_handler)
+            usage = lm_handler.get_usage_summary()
+            self.verbose.print_final_answer(final_answer)
+            self.verbose.print_summary(self.max_iterations, time_end - time_start, usage.to_dict())
+
+            # Store message history in persistent environment
+            if self.persistent and isinstance(environment, SupportsPersistence):
+                environment.add_history(message_history)
+
+            return RLMChatCompletion(
+                root_model=self.backend_kwargs.get("model_name", "unknown")
+                if self.backend_kwargs
+                else "unknown",
+                prompt=prompt,
+                response=final_answer,
+                usage_summary=usage,
+                execution_time=time_end - time_start,
+            )
+
     def _completion_turn(
         self,
         prompt: str | dict[str, Any],
@@ -322,6 +499,33 @@ class RLM:
 
         for code_block_str in code_block_strs:
             code_result: REPLResult = environment.execute_code(code_block_str)
+            code_blocks.append(CodeBlock(code=code_block_str, result=code_result))
+
+        iteration_time = time.perf_counter() - iter_start
+        return RLMIteration(
+            prompt=prompt,
+            response=response,
+            code_blocks=code_blocks,
+            iteration_time=iteration_time,
+        )
+
+    async def _acompletion_turn(
+        self,
+        prompt: str | dict[str, Any],
+        lm_handler: LMHandler,
+        environment: BaseEnv,
+    ) -> RLMIteration:
+        """
+        Perform a single iteration of the RLM (async version).
+        """
+        iter_start = time.perf_counter()
+        response = await lm_handler.acompletion(prompt)
+        code_block_strs = find_code_blocks(response)
+        code_blocks = []
+
+        for code_block_str in code_block_strs:
+            # environment.execute_code is currently sync, run in thread to avoid blocking loop
+            code_result: REPLResult = await asyncio.to_thread(environment.execute_code, code_block_str)
             code_blocks.append(CodeBlock(code=code_block_str, result=code_result))
 
         iteration_time = time.perf_counter() - iter_start
@@ -357,12 +561,46 @@ class RLM:
 
         return response
 
+    async def _adefault_answer(
+        self, message_history: list[dict[str, Any]], lm_handler: LMHandler
+    ) -> str:
+        """
+        Default behavior if the RLM runs out of iterations (async version).
+        """
+        current_prompt = message_history + [
+            {
+                "role": "assistant",
+                "content": "Please provide a final answer to the user's question based on the information provided.",
+            }
+        ]
+        response = await lm_handler.acompletion(current_prompt)
+
+        if self.logger:
+            self.logger.log(
+                RLMIteration(
+                    prompt=current_prompt,
+                    response=response,
+                    final_answer=response,
+                    code_blocks=[],
+                )
+            )
+
+        return response
+
     def _fallback_answer(self, message: str | dict[str, Any]) -> str:
         """
         Fallback behavior if the RLM is actually at max depth, and should be treated as an LM.
         """
         client: BaseLM = get_client(self.backend, self.backend_kwargs)
         response = client.completion(message)
+        return response
+
+    async def _afallback_answer(self, message: str | dict[str, Any]) -> str:
+        """
+        Fallback behavior (async version).
+        """
+        client: BaseLM = get_client(self.backend, self.backend_kwargs)
+        response = await client.acompletion(message)
         return response
 
     def _validate_persistent_environment_support(self) -> None:

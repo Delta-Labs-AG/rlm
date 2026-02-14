@@ -9,6 +9,7 @@ import os
 import time
 from socketserver import StreamRequestHandler, ThreadingTCPServer
 from threading import Thread
+from typing import Any
 
 from rlm.clients.base_lm import BaseLM
 from rlm.core.comms_utils import LMRequest, LMResponse, socket_recv, socket_send
@@ -39,6 +40,14 @@ class LMRequestHandler(StreamRequestHandler):
                 response = self._handle_single(request, handler)
             else:
                 response = LMResponse.error_response("Missing 'prompt' or 'prompts' in request.")
+
+            # Trigger callback if registered
+            if handler.on_request:
+                try:
+                    handler.on_request(request, response)
+                except Exception:
+                    # Don't let callback failure kill the request
+                    pass
 
             self._safe_send(response)
 
@@ -161,6 +170,7 @@ class LMHandler:
         host: str = "127.0.0.1",
         port: int = 0,  # auto-assign available port
         other_backend_client: BaseLM | None = None,
+        on_request: Any | None = None,
     ):
         self.default_client = client
         self.other_backend_client = other_backend_client
@@ -169,6 +179,7 @@ class LMHandler:
         self._server: ThreadingLMServer | None = None
         self._thread: Thread | None = None
         self._port = port
+        self.on_request = on_request
 
         self.register_client(client.model_name, client)
 
@@ -228,6 +239,15 @@ class LMHandler:
     def completion(self, prompt: str, model: str | None = None) -> str:
         """Direct completion call (for main process use)."""
         result = self.get_client(model).completion(prompt)
+        # Handle str | dict return from client (tools not supported in direct completion)
+        if isinstance(result, dict):
+            # Should not happen in direct completion (no tools), but handle gracefully
+            return result.get("content") or ""
+        return result
+
+    async def acompletion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+        """Async direct completion call (for main process use)."""
+        result = await self.get_client(model).acompletion(prompt)
         # Handle str | dict return from client (tools not supported in direct completion)
         if isinstance(result, dict):
             # Should not happen in direct completion (no tools), but handle gracefully

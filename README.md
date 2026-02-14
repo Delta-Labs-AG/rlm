@@ -31,7 +31,7 @@ This is [Delta-Labs'](https://github.com/Delta-Labs-AG) maintained fork of [alex
 
 Pin to a release tag:
 ```bash
-pip install "rlms @ git+https://github.com/Delta-Labs-AG/rlm.git@v0.1.0-delta.1"
+pip install "rlms @ git+https://github.com/Delta-Labs-AG/rlm.git@v0.1.0-delta.10"
 ```
 
 Or track `main`:
@@ -41,13 +41,19 @@ pip install "rlms @ git+https://github.com/Delta-Labs-AG/rlm.git@main"
 
 In `requirements.txt`:
 ```
-rlms @ git+https://github.com/Delta-Labs-AG/rlm.git@v0.1.0-delta.1
+rlms @ git+https://github.com/Delta-Labs-AG/rlm.git@v0.1.0-delta.10
 ```
 
 ## Changes from upstream
 
 ### Thread-safe REPL environment
 The upstream `LocalREPL` calls `os.chdir()` which is process-global and unsafe when multiple REPL instances run concurrently in threads. This fork replaces `_temp_cwd()` with a no-op and uses stable per-instance directories under `/tmp/rlm_repl_envs/`. Also adds multimodal prompt support to `llm_query` and `llm_query_batched`.
+
+### Async support & Inngest integration
+This fork adds full `asyncio` support via `RLM.acompletion()`. This allows the reasoning loop to run natively in async frameworks like FastAPI without blocking. It also introduces two powerful hook points for observability:
+
+- **`on_iteration` (async)**: Triggered after each reasoning turn. Perfect for wrapping steps in Inngest `step.run()` to see the reasoning timeline.
+- **`on_request` (sync)**: Triggered every time the environment calls back to the LM (sub-queries). Useful for real-time event logging.
 
 ### Resilient OpenAI client
 Adds [tenacity](https://github.com/jd/tenacity) retry with exponential jitter for `RateLimitError` and `APITimeoutError`, httpx timeout of 600s, `max_retries=3` on the OpenAI client, and `reasoning_effort` parameter support.

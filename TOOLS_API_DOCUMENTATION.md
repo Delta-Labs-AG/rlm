@@ -279,6 +279,56 @@ FINAL_VAR("results")
 """
 ```
 
+## Async & Observability
+
+### 1. `RLM.acompletion()`
+
+**Location**: `rlm.core.rlm.RLM`
+
+**Signature**:
+```python
+async def acompletion(
+    self,
+    prompt: str | dict[str, Any],
+    root_prompt: str | None = None,
+    on_iteration: Callable[[RLMIteration, int], Coroutine] | None = None
+) -> RLMChatCompletion
+```
+
+**New Parameters**:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `on_iteration` | `Callable \| None` | No | Async callback triggered after each reasoning turn. Receives `(iteration, index)`. |
+
+**Usage with Inngest**:
+```python
+async def on_step(iteration, index):
+    await ctx.step.run(f"Reasoning Step {index}", lambda: iteration.to_dict())
+
+result = await rlm.acompletion(prompt, on_iteration=on_step)
+```
+
+### 2. `on_request` Callback
+
+**Location**: `RLM.__init__`
+
+**Signature**:
+```python
+def __init__(..., on_request: Callable[[LMRequest, LMResponse], None] | None = None)
+```
+
+**Description**:
+A synchronous callback triggered every time the REPL environment makes a call back to the LM (sub-queries).
+
+**Usage**:
+```python
+def log_event(req, res):
+    inngest_client.send_sync(inngest.Event(name="rlm/sub-query", data=res.to_dict()))
+
+rlm = RLM(..., on_request=log_event)
+```
+
 ## Backward Compatibility
 
 ✅ **All existing code works unchanged**
