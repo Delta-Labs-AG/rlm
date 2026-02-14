@@ -127,7 +127,9 @@ class BaseLocalREPL(NonIsolatedEnv):
     def _ensure_messages_format(self, prompt: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
         if isinstance(prompt, str):
             return [{"role": "user", "content": prompt}]
-        return prompt
+        if isinstance(prompt, list):
+            return prompt
+        raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
     def load_context(self, context_payload: dict | list | str):
         self.add_context(context_payload, 0)
@@ -209,6 +211,10 @@ class DirectREPL(BaseLocalREPL):
     def __init__(self, lm_handler: Any, **kwargs):
         self.lm_handler = lm_handler
         super().__init__(**kwargs)
+
+    def update_handler_address(self, address: tuple[str, int]) -> None:
+        """Protocol requirement. DirectREPL already has handler reference."""
+        pass
 
     def _llm_query(self, prompt, model=None, response_format=None, tools=None, tool_handler=None, response_model=None) -> Any:
         if tools is not None and tool_handler is None: raise ValueError("tool_handler is required")

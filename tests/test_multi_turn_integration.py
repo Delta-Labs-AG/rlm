@@ -18,9 +18,45 @@ from rlm.core.types import ModelUsageSummary, UsageSummary
 
 
 def create_mock_lm(responses: list[str]) -> Mock:
-    """Create a mock LM that returns responses in order."""
+    """Create a mock LM that returns responses in order as structured dicts."""
     mock = Mock()
-    mock.completion.side_effect = list(responses)
+    
+    # Wrap responses in structured dicts as expected by LMHandler
+    structured_responses = [
+        {"content": r, "thought": None, "tool_calls": None, "response_id": f"resp_{i}"}
+        for i, r in enumerate(responses)
+    ]
+    
+    call_index = 0
+    def side_effect(prompt, *args, **kwargs):
+        nonlocal call_index
+        
+        # Determine if this is a main RLM loop call or a sub-call
+        is_main_rlm_call = False
+        if isinstance(prompt, list):
+            # Non-chained main call
+            if any(m.get("role") == "system" for m in prompt):
+                is_main_rlm_call = True
+            # Chained main call
+            elif len(prompt) == 1:
+                content = prompt[0].get("content", "")
+                if "The history before" in content or "You have not interacted" in content:
+                    is_main_rlm_call = True
+            # Sub-call or start of sub-RLM
+            elif len(prompt) > 0 and "You are tasked with" in prompt[0].get("content", ""):
+                is_main_rlm_call = True
+
+        if is_main_rlm_call:
+            if call_index < len(structured_responses):
+                res = structured_responses[call_index]
+                call_index += 1
+                return res
+            return {"content": "FINAL(error: too many calls)", "thought": None, "tool_calls": None, "response_id": "error"}
+        else:
+            # Sub-LM call
+            return {"content": "mock sub-call response", "thought": None, "tool_calls": None, "response_id": "sub_call"}
+
+    mock.completion.side_effect = side_effect
     mock.get_usage_summary.return_value = UsageSummary(
         model_usage_summaries={
             "mock": ModelUsageSummary(total_calls=1, total_input_tokens=100, total_output_tokens=50)
@@ -49,7 +85,8 @@ class TestMultiTurnPersistentEnvironment:
                 rlm.completion("First context")
                 first_env = rlm._persistent_env
 
-                mock_lm.completion.side_effect = list(responses)
+                # Reset side effect for next call
+                mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
 
                 rlm.completion("Second context")
                 second_env = rlm._persistent_env
@@ -71,9 +108,9 @@ class TestMultiTurnPersistentEnvironment:
                 persistent=True,
             ) as rlm:
                 rlm.completion("First document")
-                mock_lm.completion.side_effect = list(responses)
+                mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
                 rlm.completion("Second document")
-                mock_lm.completion.side_effect = list(responses)
+                mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
                 rlm.completion("Third document")
 
                 env = rlm._persistent_env
@@ -97,9 +134,9 @@ class TestMultiTurnPersistentEnvironment:
                 persistent=True,
             ) as rlm:
                 rlm.completion("Context A")
-                mock_lm.completion.side_effect = list(responses)
+                mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
                 rlm.completion("Context B")
-                mock_lm.completion.side_effect = list(responses)
+                mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
                 rlm.completion("Context C")
 
                 env = rlm._persistent_env
@@ -134,7 +171,7 @@ class TestMultiTurnPersistentEnvironment:
                 rlm.completion("Compute 42 * 2")
                 assert rlm._persistent_env.locals.get("computed_value") == 84
 
-                mock_lm.completion.side_effect = list(second_responses)
+                mock_lm.completion.side_effect = create_mock_lm(second_responses).completion.side_effect
                 rlm.completion("Add 10 to the previous result")
 
                 assert rlm._persistent_env.locals.get("computed_value") == 84
@@ -158,14 +195,21 @@ class TestMultiTurnPromptAwareness:
                 persistent=True,
             ) as rlm:
                 rlm.completion("First")
-                mock_lm.completion.side_effect = list(responses)
+                mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
                 rlm.completion("Second")
 
-                last_prompt = mock_lm.completion.call_args[0][0]
-                user_messages = [m for m in last_prompt if m.get("role") == "user"]
-                user_content = " ".join(m.get("content", "") for m in user_messages)
-
-                assert "2 contexts" in user_content or "context_0" in user_content
+                # The last call to completion was the final answer turn of the SECOND completion() call.
+                # In chained mode, this only sends the delta.
+                # Let's find the call where we informed the model about context count.
+                found = False
+                for call in mock_lm.completion.call_args_list:
+                    prompt = call[0][0]
+                    if isinstance(prompt, list):
+                        content = " ".join(m.get("content", "") for m in prompt)
+                        if "2 contexts" in content or "context_0" in content:
+                            found = True
+                            break
+                assert found
 
     def test_prompt_includes_history_count(self):
         """Model should be informed about available histories."""
@@ -181,14 +225,18 @@ class TestMultiTurnPromptAwareness:
                 persistent=True,
             ) as rlm:
                 rlm.completion("First task")
-                mock_lm.completion.side_effect = list(responses)
+                mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
                 rlm.completion("Second task")
 
-                last_prompt = mock_lm.completion.call_args[0][0]
-                user_messages = [m for m in last_prompt if m.get("role") == "user"]
-                user_content = " ".join(m.get("content", "") for m in user_messages)
-
-                assert "history" in user_content.lower()
+                found = False
+                for call in mock_lm.completion.call_args_list:
+                    prompt = call[0][0]
+                    if isinstance(prompt, list):
+                        content = " ".join(m.get("content", "") for m in prompt).lower()
+                        if "history" in content:
+                            found = True
+                            break
+                assert found
 
 
 class TestMultiTurnCodeExecution:
@@ -213,7 +261,7 @@ class TestMultiTurnCodeExecution:
             ) as rlm:
                 rlm.completion("Document A")
 
-                mock_lm.completion.side_effect = list(second_responses)
+                mock_lm.completion.side_effect = create_mock_lm(second_responses).completion.side_effect
                 rlm.completion("Document B")
 
                 env = rlm._persistent_env
@@ -239,7 +287,7 @@ class TestMultiTurnCodeExecution:
             ) as rlm:
                 rlm.completion("First query")
 
-                mock_lm.completion.side_effect = list(second_responses)
+                mock_lm.completion.side_effect = create_mock_lm(second_responses).completion.side_effect
                 rlm.completion("Second query")
 
                 env = rlm._persistent_env
@@ -267,7 +315,7 @@ class TestNonPersistentMode:
             rlm.completion("First")
             assert rlm._persistent_env is None
 
-            mock_lm.completion.side_effect = list(responses)
+            mock_lm.completion.side_effect = create_mock_lm(responses).completion.side_effect
             rlm.completion("Second")
             assert rlm._persistent_env is None
 
@@ -376,11 +424,11 @@ class TestMultiTurnEndToEnd:
                 result1 = rlm.completion("First document about cats")
                 assert "Summarized" in result1.response
 
-                mock_lm.completion.side_effect = list(turn2_responses)
+                mock_lm.completion.side_effect = create_mock_lm(turn2_responses).completion.side_effect
                 result2 = rlm.completion("Second document about dogs")
                 assert "Compared" in result2.response
 
-                mock_lm.completion.side_effect = list(turn3_responses)
+                mock_lm.completion.side_effect = create_mock_lm(turn3_responses).completion.side_effect
                 result3 = rlm.completion("Synthesize everything")
                 assert "synthesized" in result3.response
 

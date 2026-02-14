@@ -16,6 +16,9 @@ def find_code_blocks(text: str) -> list[str]:
     Find REPL code blocks in text wrapped in triple backticks and return List of content(s).
     Returns None if no code blocks are found.
     """
+    if not isinstance(text, str):
+        return []
+
     pattern = r"```repl\s*\n(.*?)\n```"
     results = []
 
@@ -40,6 +43,9 @@ def find_final_answer(text: str, environment: "BaseEnv | None" = None) -> str | 
     Returns:
         The final answer string, or None if no final answer pattern is found
     """
+    if not isinstance(text, str):
+        return None
+
     # Check for FINAL_VAR pattern first - must be at start of line
     final_var_pattern = r"^\s*FINAL_VAR\((.*?)\)"
     match = re.search(final_var_pattern, text, re.MULTILINE | re.DOTALL)

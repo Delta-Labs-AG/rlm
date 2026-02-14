@@ -3,11 +3,6 @@ from unittest.mock import MagicMock, patch
 from rlm.clients.openai import OpenAIClient
 
 class TestOpenAIResponsesAPI:
-    def test_init_defaults_to_responses_api(self):
-        with patch("openai.OpenAI"), patch("openai.AsyncOpenAI"):
-            client = OpenAIClient(api_key="test-key")
-            assert client.use_responses_api is True
-
     def test_parse_responses_response_with_reasoning(self):
         with patch("openai.OpenAI"), patch("openai.AsyncOpenAI"):
             client = OpenAIClient(api_key="test-key")

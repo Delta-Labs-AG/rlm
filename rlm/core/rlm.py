@@ -668,7 +668,7 @@ class RLM:
         - add_context(payload, index): Add new context for multi-turn conversations
         - get_context_count(): Return the number of loaded contexts
 
-        Currently only 'local' (LocalREPL) supports these methods.
+        Currently 'local' (LocalREPL and DirectREPL) supports these methods.
 
         Raises:
             ValueError: If the environment type does not support persistent mode.
