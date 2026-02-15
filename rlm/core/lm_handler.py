@@ -134,7 +134,12 @@ class LMHandler:
         client = self.get_client(request.model, request.depth)
 
         start_time = time.perf_counter()
-        content = client.completion(request.prompt, response_format=request.response_format)
+        content = client.completion(
+            request.prompt,
+            response_format=request.response_format,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+        )
         end_time = time.perf_counter()
 
         model_usage = client.get_last_usage()
@@ -163,7 +168,15 @@ class LMHandler:
         for i in range(0, len(prompts_and_formats), _BATCH_CHUNK_SIZE):
             chunk = prompts_and_formats[i : i + _BATCH_CHUNK_SIZE]
             chunk_results = await asyncio.gather(
-                *[client.acompletion(prompt, response_format=fmt) for prompt, fmt in chunk],
+                *[
+                    client.acompletion(
+                        prompt,
+                        response_format=fmt,
+                        tools=request.tools,
+                        tool_choice=request.tool_choice,
+                    )
+                    for prompt, fmt in chunk
+                ],
                 return_exceptions=True,
             )
             all_results.extend(chunk_results)
@@ -263,7 +276,9 @@ class LMHandler:
             return result.get("content") or ""
         return result
 
-    async def acompletion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+    async def acompletion(
+        self, prompt: str | list[dict[str, Any]], model: str | None = None
+    ) -> str:
         """Async direct completion call (for main process use)."""
         result = await self.get_client(model).acompletion(prompt)
         # Handle str | dict return from client (tools not supported in direct completion)

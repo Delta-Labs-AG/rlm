@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import threading
@@ -176,7 +175,7 @@ def _get_semaphore(model: str) -> threading.BoundedSemaphore:
 
 def _synthetic_rate_limit_error(message: str) -> RateLimitError:
     """Create a synthetic RateLimitError for semaphore timeouts."""
-    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
     response = httpx.Response(status_code=429, text=message, request=request)
     return RateLimitError(message=message, response=response, body=None)
 
@@ -192,15 +191,10 @@ _RETRY_CONFIG = {
 
 # Load API keys from environment variables
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DEFAULT_OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-DEFAULT_VERCEL_API_KEY = os.getenv("AI_GATEWAY_API_KEY")
-DEFAULT_PRIME_INTELLECT_BASE_URL = "https://api.pinference.ai/api/v1/"
 
 
 class OpenAIClient(BaseLM):
-    """
-    LM Client for running models with the OpenAI API. Works with vLLM as well.
-    """
+    """LM Client for running models with the OpenAI Responses API."""
 
     def __init__(
         self,
@@ -208,24 +202,17 @@ class OpenAIClient(BaseLM):
         model_name: str | None = None,
         base_url: str | None = None,
         reasoning_effort: str | None = None,
-        beta_responses: bool = False,
-        use_responses_api: bool = False,
         **kwargs,
     ):
         super().__init__(model_name=model_name, **kwargs)
         self.reasoning_effort = reasoning_effort  # none, minimal, low, medium, high, xhigh
-        self.beta_responses = beta_responses
-        self.use_responses_api = use_responses_api
 
         if api_key is None:
-            if base_url == "https://api.openai.com/v1" or base_url is None:
-                api_key = DEFAULT_OPENAI_API_KEY
-            elif base_url == "https://openrouter.ai/api/v1":
-                api_key = DEFAULT_OPENROUTER_API_KEY
-            elif base_url == "https://ai-gateway.vercel.sh/v1":
-                api_key = DEFAULT_VERCEL_API_KEY
+            api_key = DEFAULT_OPENAI_API_KEY
 
-        # For vLLM, set base_url to local vLLM server address.
+        if not self.model_name:
+            raise ValueError("Model name is required for OpenAI client.")
+
         import httpx
 
         _timeout = httpx.Timeout(600.0, connect=10.0)
@@ -235,13 +222,13 @@ class OpenAIClient(BaseLM):
         self.async_client = openai.AsyncOpenAI(
             api_key=api_key, base_url=base_url, timeout=_timeout, max_retries=3
         )
-        self.model_name = model_name
-
         # Per-model usage tracking
         self.model_call_counts: dict[str, int] = defaultdict(int)
         self.model_input_tokens: dict[str, int] = defaultdict(int)
         self.model_output_tokens: dict[str, int] = defaultdict(int)
         self.model_total_tokens: dict[str, int] = defaultdict(int)
+        self.last_prompt_tokens = 0
+        self.last_completion_tokens = 0
 
     def _prepare_responses_request(
         self,
@@ -266,11 +253,7 @@ class OpenAIClient(BaseLM):
             if role == "system" and not instructions:
                 instructions = content
             else:
-                input_items.append({
-                    "type": "message",
-                    "role": role,
-                    "content": content
-                })
+                input_items.append({"type": "message", "role": role, "content": content})
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -278,53 +261,65 @@ class OpenAIClient(BaseLM):
         }
         if instructions:
             kwargs["instructions"] = instructions
-        
+
         if tools:
             kwargs["tools"] = tools
             if tool_choice:
                 kwargs["tool_choice"] = tool_choice
-        
+
         if response_format:
             kwargs["output_format"] = response_format
 
         return kwargs
 
-    def _parse_responses_response(self, response: Any) -> str | dict:
-        """Parse the new Response object into RLM format."""
+    def _parse_responses_response(self, response: Any) -> dict[str, Any]:
+        """Parse a Responses API object into a normalized response payload."""
         output_items = getattr(response, "output", [])
-        
-        tool_calls = []
+        tool_calls: list[dict[str, Any]] = []
         final_content = ""
 
         for item in output_items:
-            # Check for different item types in the new API
-            if hasattr(item, "type"):
-                if item.type == "message":
-                    final_content = getattr(item, "content", "")
-                elif item.type == "function_call":
-                    tool_calls.append({
+            if not hasattr(item, "type"):
+                continue
+            if item.type == "message":
+                content = getattr(item, "content", "")
+                if isinstance(content, list):
+                    final_content = "".join(str(part) for part in content)
+                else:
+                    final_content = str(content or "")
+            elif item.type == "function_call":
+                tool_calls.append(
+                    {
                         "id": item.id,
                         "name": item.name,
                         "arguments": item.arguments,
-                    })
-        
-        if tool_calls:
-            return {
-                "tool_calls": tool_calls,
-                "content": final_content or None
-            }
-        
-        return final_content
+                    }
+                )
+
+        return {
+            "content": final_content,
+            "tool_calls": tool_calls,
+        }
+
+    def _extract_usage(self, usage: Any) -> tuple[int, int]:
+        if usage is None:
+            return 0, 0
+        input_tokens = getattr(usage, "input_tokens", None)
+        output_tokens = getattr(usage, "output_tokens", None)
+        if input_tokens is None:
+            input_tokens = getattr(usage, "prompt_tokens", 0)
+        if output_tokens is None:
+            output_tokens = getattr(usage, "completion_tokens", 0)
+        return int(input_tokens or 0), int(output_tokens or 0)
 
     @retry(**_RETRY_CONFIG)
     def completion(
         self,
         prompt: str | list[dict[str, Any]],
-        model: str | None = None,
         response_format: dict | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
-    ) -> str | dict:
+    ) -> str | dict[str, Any]:
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
@@ -332,27 +327,10 @@ class OpenAIClient(BaseLM):
         else:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
-        model = model or self.model_name
+        model = self.model_name
+
         if not model:
             raise ValueError("Model name is required for OpenAI client.")
-
-        extra_body = {}
-        if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
-            extra_body["usage"] = {"include": True}
-
-        kwargs = {"model": model, "messages": messages}
-        if self.beta_responses:
-            kwargs["extra_headers"] = {"OpenAI-Beta": "responses=true"}
-        if extra_body:
-            kwargs["extra_body"] = extra_body
-        if self.reasoning_effort:
-            kwargs["reasoning_effort"] = self.reasoning_effort
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-        if tools is not None:
-            kwargs["tools"] = tools
-            if tool_choice is not None:
-                kwargs["tool_choice"] = tool_choice
 
         sem = _get_semaphore(model)
         if not sem.acquire(timeout=120):
@@ -360,41 +338,29 @@ class OpenAIClient(BaseLM):
         try:
             t0 = request_tracker.start_request(model)
             try:
-                if self.use_responses_api:
-                    resp_kwargs = self._prepare_responses_request(
-                        prompt, model, tools, tool_choice, response_format
-                    )
-                    response = self.client.responses.create(**resp_kwargs)
-                    content = self._parse_responses_response(response)
-                    # Note: Usage tracking for Responses API might need adjustment
-                    usage = getattr(response, "usage", None)
-                else:
-                    response = self.client.chat.completions.create(**kwargs)
-                    self._track_cost(response, model)
-                    usage = getattr(response, "usage", None)
-                    
-                    message = response.choices[0].message
-                    if hasattr(message, "tool_calls") and message.tool_calls:
-                        content = {
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "arguments": json.loads(tc.function.arguments),
-                                }
-                                for tc in message.tool_calls
-                            ],
-                            "content": message.content,
-                        }
-                    else:
-                        content = message.content or ""
-
+                resp_kwargs = self._prepare_responses_request(
+                    messages,
+                    model,
+                    tools,
+                    tool_choice,
+                    response_format,
+                )
+                response = self.client.responses.create(**resp_kwargs)
+                content = self._parse_responses_response(response)
+                usage = getattr(response, "usage", None)
+                input_tokens, output_tokens = self._extract_usage(usage)
                 request_tracker.end_request(
                     model,
                     t0,
-                    input_tokens=usage.prompt_tokens if usage else 0,
-                    output_tokens=usage.completion_tokens if usage else 0,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                 )
+                self.model_call_counts[model] += 1
+                self.model_input_tokens[model] += input_tokens
+                self.model_output_tokens[model] += output_tokens
+                self.model_total_tokens[model] += input_tokens + output_tokens
+                self.last_prompt_tokens = input_tokens
+                self.last_completion_tokens = output_tokens
                 return content
             except BaseException as exc:
                 request_tracker.end_request(model, t0, error=exc)
@@ -406,11 +372,10 @@ class OpenAIClient(BaseLM):
     async def acompletion(
         self,
         prompt: str | list[dict[str, Any]],
-        model: str | None = None,
         response_format: dict | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
-    ) -> str | dict:
+    ) -> str | dict[str, Any]:
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         elif isinstance(prompt, list) and all(isinstance(item, dict) for item in prompt):
@@ -418,27 +383,9 @@ class OpenAIClient(BaseLM):
         else:
             raise ValueError(f"Invalid prompt type: {type(prompt)}")
 
-        model = model or self.model_name
+        model = self.model_name
         if not model:
             raise ValueError("Model name is required for OpenAI client.")
-
-        extra_body = {}
-        if self.client.base_url == DEFAULT_PRIME_INTELLECT_BASE_URL:
-            extra_body["usage"] = {"include": True}
-
-        kwargs = {"model": model, "messages": messages}
-        if self.beta_responses:
-            kwargs["extra_headers"] = {"OpenAI-Beta": "responses=true"}
-        if extra_body:
-            kwargs["extra_body"] = extra_body
-        if self.reasoning_effort:
-            kwargs["reasoning_effort"] = self.reasoning_effort
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-        if tools is not None:
-            kwargs["tools"] = tools
-            if tool_choice is not None:
-                kwargs["tool_choice"] = tool_choice
 
         sem = _get_semaphore(model)
         acquired = await asyncio.to_thread(sem.acquire, timeout=120)
@@ -447,61 +394,35 @@ class OpenAIClient(BaseLM):
         try:
             t0 = request_tracker.start_request(model)
             try:
-                if self.use_responses_api:
-                    resp_kwargs = self._prepare_responses_request(
-                        prompt, model, tools, tool_choice, response_format
-                    )
-                    response = await self.async_client.responses.create(**resp_kwargs)
-                    content = self._parse_responses_response(response)
-                    usage = getattr(response, "usage", None)
-                else:
-                    response = await self.async_client.chat.completions.create(**kwargs)
-                    self._track_cost(response, model)
-                    usage = getattr(response, "usage", None)
-                    
-                    message = response.choices[0].message
-                    if hasattr(message, "tool_calls") and message.tool_calls:
-                        content = {
-                            "tool_calls": [
-                                {
-                                    "id": tc.id,
-                                    "name": tc.function.name,
-                                    "arguments": json.loads(tc.function.arguments),
-                                }
-                                for tc in message.tool_calls
-                            ],
-                            "content": message.content,
-                        }
-                    else:
-                        content = message.content or ""
-
+                resp_kwargs = self._prepare_responses_request(
+                    messages,
+                    model,
+                    tools,
+                    tool_choice,
+                    response_format,
+                )
+                response = await self.async_client.responses.create(**resp_kwargs)
+                content = self._parse_responses_response(response)
+                usage = getattr(response, "usage", None)
+                input_tokens, output_tokens = self._extract_usage(usage)
                 request_tracker.end_request(
                     model,
                     t0,
-                    input_tokens=usage.prompt_tokens if usage else 0,
-                    output_tokens=usage.completion_tokens if usage else 0,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                 )
+                self.model_call_counts[model] += 1
+                self.model_input_tokens[model] += input_tokens
+                self.model_output_tokens[model] += output_tokens
+                self.model_total_tokens[model] += input_tokens + output_tokens
+                self.last_prompt_tokens = input_tokens
+                self.last_completion_tokens = output_tokens
                 return content
             except BaseException as exc:
                 request_tracker.end_request(model, t0, error=exc)
                 raise
         finally:
             sem.release()
-
-    def _track_cost(self, response: openai.ChatCompletion, model: str):
-        self.model_call_counts[model] += 1
-
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            raise ValueError("No usage data received. Tracking tokens not possible.")
-
-        self.model_input_tokens[model] += usage.prompt_tokens
-        self.model_output_tokens[model] += usage.completion_tokens
-        self.model_total_tokens[model] += usage.total_tokens
-
-        # Track last call for handler to read
-        self.last_prompt_tokens = usage.prompt_tokens
-        self.last_completion_tokens = usage.completion_tokens
 
     def get_usage_summary(self) -> UsageSummary:
         model_summaries = {}

@@ -128,7 +128,9 @@ class RLM:
             self.verbose.print_metadata(metadata)
 
     @contextmanager
-    def _spawn_completion_context(self, prompt: str | dict[str, Any], metadata: dict[str, Any] | None = None):
+    def _spawn_completion_context(
+        self, prompt: str | dict[str, Any], metadata: dict[str, Any] | None = None
+    ):
         """
         Spawn an LM handler and environment for a single completion call.
         """
@@ -154,12 +156,14 @@ class RLM:
         if self.persistent and self._persistent_env is not None:
             environment = self._persistent_env
             if not self._env_supports_persistence(environment):
-                raise RuntimeError(f"Persistent environment '{type(environment).__name__}' not supported.")
-            
+                raise RuntimeError(
+                    f"Persistent environment '{type(environment).__name__}' not supported."
+                )
+
             if isinstance(environment, SocketREPL):
                 lm_handler.start()
                 environment.update_handler_address((lm_handler.host, lm_handler.port))
-            
+
             environment.add_context(prompt)
         else:
             env_kwargs = self.environment_kwargs.copy()
@@ -170,7 +174,7 @@ class RLM:
             # Strategy: If local, default to DirectREPL (no socket)
             # If backend is explicitly set to 'socket', use SocketREPL
             env_backend = env_kwargs.pop("env_backend", "direct")
-            
+
             if self.environment_type == "local" and env_backend == "direct":
                 environment = DirectREPL(lm_handler=lm_handler, **env_kwargs)
             else:
@@ -189,7 +193,9 @@ class RLM:
                 environment.cleanup()
 
     @asynccontextmanager
-    async def _spawn_acompletion_context(self, prompt: str | dict[str, Any], metadata: dict[str, Any] | None = None):
+    async def _spawn_acompletion_context(
+        self, prompt: str | dict[str, Any], metadata: dict[str, Any] | None = None
+    ):
         """
         Spawn an LM handler and environment for a single completion call (async version).
         """
@@ -215,12 +221,14 @@ class RLM:
         if self.persistent and self._persistent_env is not None:
             environment = self._persistent_env
             if not self._env_supports_persistence(environment):
-                raise RuntimeError(f"Persistent environment '{type(environment).__name__}' not supported.")
-            
+                raise RuntimeError(
+                    f"Persistent environment '{type(environment).__name__}' not supported."
+                )
+
             if isinstance(environment, SocketREPL):
                 lm_handler.start()
                 environment.update_handler_address((lm_handler.host, lm_handler.port))
-            
+
             environment.add_context(prompt)
         else:
             env_kwargs = self.environment_kwargs.copy()
@@ -229,7 +237,7 @@ class RLM:
             env_kwargs["metadata"] = metadata or {}
 
             env_backend = env_kwargs.pop("env_backend", "direct")
-            
+
             if self.environment_type == "local" and env_backend == "direct":
                 environment = DirectREPL(lm_handler=lm_handler, **env_kwargs)
             else:
@@ -390,7 +398,10 @@ class RLM:
         if self.depth >= self.max_depth:
             return await self._afallback_answer(prompt)
 
-        async with self._spawn_acompletion_context(prompt, metadata=metadata) as (lm_handler, environment):
+        async with self._spawn_acompletion_context(prompt, metadata=metadata) as (
+            lm_handler,
+            environment,
+        ):
             message_history = self._setup_prompt(prompt)
             code_executed = False  # Track whether any REPL code has run
 
@@ -533,7 +544,9 @@ class RLM:
 
         for code_block_str in code_block_strs:
             # environment.execute_code is currently sync, run in thread to avoid blocking loop
-            code_result: REPLResult = await asyncio.to_thread(environment.execute_code, code_block_str)
+            code_result: REPLResult = await asyncio.to_thread(
+                environment.execute_code, code_block_str
+            )
             code_blocks.append(CodeBlock(code=code_block_str, result=code_result))
 
         iteration_time = time.perf_counter() - iter_start

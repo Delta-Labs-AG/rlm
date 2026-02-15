@@ -8,7 +8,6 @@ Tests cover:
 - Message format conversion
 """
 
-import json
 from unittest.mock import Mock, patch
 
 import pytest
@@ -23,18 +22,27 @@ from rlm.environments.local_repl import MAX_TOOL_ITERATIONS, LocalREPL
 
 @pytest.fixture
 def mock_openai_response():
-    """Create a mock OpenAI response object."""
+    """Create a mock OpenAI Responses API response object."""
 
     def _make_response(content=None, tool_calls=None):
         response = Mock()
-        response.choices = [Mock()]
-        response.choices[0].message = Mock()
-        response.choices[0].message.content = content
-        response.choices[0].message.tool_calls = tool_calls
+        output_items = []
+        if content is not None:
+            message = Mock()
+            message.type = "message"
+            message.content = content
+            output_items.append(message)
+        for tool_call in tool_calls or []:
+            call = Mock()
+            call.type = "function_call"
+            call.id = tool_call["id"]
+            call.name = tool_call["name"]
+            call.arguments = tool_call["arguments"]
+            output_items.append(call)
+        response.output = output_items
         response.usage = Mock()
-        response.usage.prompt_tokens = 10
-        response.usage.completion_tokens = 20
-        response.usage.total_tokens = 30
+        response.usage.input_tokens = 10
+        response.usage.output_tokens = 20
         return response
 
     return _make_response
@@ -42,19 +50,16 @@ def mock_openai_response():
 
 def test_client_returns_dict_for_tool_calls(mock_openai_response):
     """Test that OpenAI client returns dict when tool_calls are present."""
-    # Create mock tool call
-    tool_call = Mock()
-    tool_call.id = "call_123"
-    tool_call.function = Mock()
-    tool_call.function.name = "get_weather"
-    tool_call.function.arguments = json.dumps({"city": "San Francisco"})
-
-    # Mock response with tool calls
-    mock_response = mock_openai_response(content=None, tool_calls=[tool_call])
+    mock_response = mock_openai_response(
+        content="",
+        tool_calls=[
+            {"id": "call_123", "name": "get_weather", "arguments": '{"city": "San Francisco"}'}
+        ],
+    )
 
     with patch("openai.OpenAI") as mock_openai_class:
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.responses.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
 
         client = OpenAIClient(api_key="test-key", model_name="gpt-4")
@@ -66,7 +71,7 @@ def test_client_returns_dict_for_tool_calls(mock_openai_response):
         assert len(result["tool_calls"]) == 1
         assert result["tool_calls"][0]["id"] == "call_123"
         assert result["tool_calls"][0]["name"] == "get_weather"
-        assert result["tool_calls"][0]["arguments"] == {"city": "San Francisco"}
+        assert result["tool_calls"][0]["arguments"] == '{"city": "San Francisco"}'
 
 
 def test_client_returns_str_for_content(mock_openai_response):
@@ -75,15 +80,14 @@ def test_client_returns_str_for_content(mock_openai_response):
 
     with patch("openai.OpenAI") as mock_openai_class:
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.responses.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
 
         client = OpenAIClient(api_key="test-key", model_name="gpt-4")
         result = client.completion("Test prompt")
 
-        # Should return string
-        assert isinstance(result, str)
-        assert result == "Hello, world!"
+        assert isinstance(result, dict)
+        assert result["content"] == "Hello, world!"
 
 
 def test_client_handles_tools_parameters(mock_openai_response):
@@ -92,7 +96,7 @@ def test_client_handles_tools_parameters(mock_openai_response):
 
     with patch("openai.OpenAI") as mock_openai_class:
         mock_client = Mock()
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.responses.create.return_value = mock_response
         mock_openai_class.return_value = mock_client
 
         client = OpenAIClient(api_key="test-key", model_name="gpt-4")
@@ -101,7 +105,7 @@ def test_client_handles_tools_parameters(mock_openai_response):
         client.completion("Test", tools=tools, tool_choice="auto")
 
         # Verify tools were passed to API
-        call_kwargs = mock_client.chat.completions.create.call_args[1]
+        call_kwargs = mock_client.responses.create.call_args[1]
         assert "tools" in call_kwargs
         assert call_kwargs["tools"] == tools
         assert call_kwargs["tool_choice"] == "auto"
@@ -131,7 +135,7 @@ def test_ensure_messages_format_invalid():
     """Test _ensure_messages_format raises on invalid input."""
     env = LocalREPL()
     with pytest.raises(ValueError, match="Invalid prompt type"):
-        env._ensure_messages_format(123)
+        env._ensure_messages_format(123)  # type: ignore[arg-type]
 
 
 # =============================================================================

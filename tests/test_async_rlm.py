@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -28,10 +27,7 @@ async def test_rlm_acompletion_basic():
     """Test basic async completion."""
     # We need to run some code first, or use a multi-response sequence
     # because of the guard that requires code execution before FINAL.
-    responses = [
-        "Thinking...\n```repl\npass\n```",
-        "FINAL(async answer)"
-    ]
+    responses = ["Thinking...\n```repl\npass\n```", "FINAL(async answer)"]
 
     with patch.object(rlm_module, "get_client") as mock_get_client:
         mock_lm = await create_mock_alm(responses)
@@ -41,7 +37,7 @@ async def test_rlm_acompletion_basic():
             backend="openai",
             backend_kwargs={"model_name": "test"},
         )
-        
+
         result = await rlm.acompletion("Hello async")
         assert result.response == "async answer"
         assert mock_lm.acompletion.call_count == 2
@@ -63,14 +59,14 @@ async def test_rlm_acompletion_with_hooks():
             backend="openai",
             backend_kwargs={"model_name": "test"},
         )
-        
+
         iteration_results = []
-        
+
         async def on_iteration(iteration, index):
             iteration_results.append((index, iteration))
-        
+
         result = await rlm.acompletion("Hello async with hooks", on_iteration=on_iteration)
-        
+
         assert result.response == "the answer is 42"
         assert len(iteration_results) == 2
         assert iteration_results[0][0] == 1
@@ -85,32 +81,29 @@ async def test_rlm_on_request_callback():
         "```repl\nresult = llm_query('What is 2+2?')\nprint(result)\n```",
         "FINAL(4)",
     ]
-    
+
     # Sub-LM response
     sub_responses = ["4"]
 
     with patch.object(rlm_module, "get_client") as mock_get_client:
         # Mock for main RLM
         mock_lm = await create_mock_alm(responses)
-        
+
         # Mock for sub-LM call
         mock_sub_lm = await create_mock_alm(sub_responses)
-        
+
         # get_client will be called twice
         mock_get_client.side_effect = [mock_lm, mock_sub_lm]
 
         request_data = []
+
         def on_request(request, response):
             request_data.append((request, response))
 
-        rlm = RLM(
-            backend="openai",
-            backend_kwargs={"model_name": "test"},
-            on_request=on_request
-        )
-        
+        rlm = RLM(backend="openai", backend_kwargs={"model_name": "test"}, on_request=on_request)
+
         result = await rlm.acompletion("Hello with sub-calls")
-        
+
         assert result.response == "4"
         # We expect at least one request recorded (the sub-call via socket)
         assert len(request_data) >= 1
